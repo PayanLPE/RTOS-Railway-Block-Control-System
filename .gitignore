@@ -1,0 +1,45 @@
+# =========================
+# Build output
+# =========================
+build/
+*.o
+*.d
+*.elf
+*.so
+*.exe
+*.out
+
+# =========================
+# IDE / Workspace metadata
+# =========================
+.metadata/
+.settings/
+*.launch
+*.project
+*.cproject
+
+# =========================
+# OS-specific files
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# VM / system files (QNX VM)
+# =========================
+*.vdi
+*.vbox
+*.iso
+
+# =========================
+# Temporary files / logs
+# =========================
+*.log
+*.tmp
+*~
+
+# =========================
+# VM Folders
+# =========================
+Local_QNX/
+deadlock_vm/
