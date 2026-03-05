@@ -52,6 +52,8 @@ typedef struct {
     int destination; // Destination track the train wants to go to (TODO needs routing algorithm)
     int speed; // Speed of the train (for future use, not currently implemented)
     int length; // Length of the train (for future use, not currently implemented)
+    // Don't need distance since we can compute it based on entry time and speed
+    // Assumes constant speed, which is not realistic but simplifies the problem for now
 } train_data_t;
 
 #endif // IPC_PROTOCOL_H
