@@ -20,7 +20,9 @@ typedef enum {
     MSG_REQUEST_TRACK,
     MSG_RELEASE_TRACK,
     MSG_ACK,
-    MSG_DENY
+    MSG_DENY,
+    MSG_GET_TRAIN_DATA,    // DeadlockManager -> TrainController: get train data
+    MSG_TRAIN_DATA_REPLY   // TrainController -> DeadlockManager: train data response
 } message_type_t;
 
 // IPC message structure
@@ -29,6 +31,13 @@ typedef struct {
     int train_id;
     int track_id;
 } ipc_message_t;
+
+// Train data query/response message
+typedef struct {
+    message_type_t type;
+    int train_id;
+    train_data_t train_data;  // Full train data for responses
+} train_query_message_t;
 
 // Forward declaration for track_data_t, prevents cirular dependency issues with request_record_t
 typedef struct track_data_s track_data_t;

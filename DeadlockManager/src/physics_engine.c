@@ -66,18 +66,18 @@ int update_train_position(train_data_t *train, time_t current_time) {
  * Check if train has completely left the track
  * Train has left when its rear position exceeds track length
  */
-int has_train_left_track(train_position_t *train_pos, int track_length) {
-    if (train_pos == NULL) {
+int has_train_left_track(train_data_t *train, int track_length) {
+    if (train == NULL || track_length <= 0) {
         return 1;
     }
-    return (train_pos->rear_position >= track_length) ? 1 : 0;
+    return (train->rear_position >= (double)track_length) ? 1 : 0;
 }
 
 /**
  * Check if two trains on the same track collide
  * Collision occurs if there's overlap in their positions
  */
-int check_train_collision(train_position_t *train1, train_position_t *train2) {
+int check_train_collision(train_data_t *train1, train_data_t *train2) {
     if (train1 == NULL || train2 == NULL) {
         return 0;
     }
@@ -95,10 +95,10 @@ int check_train_collision(train_position_t *train1, train_position_t *train2) {
 }
 
 /**
- * Calculate distance between two trains
+ * Calculate distance between two trains on the same track
  * Positive means separated, negative means overlapping (collision)
  */
-double get_distance_between_trains(train_position_t *train1, train_position_t *train2) {
+double get_distance_between_trains(train_data_t *train1, train_data_t *train2) {
     if (train1 == NULL || train2 == NULL) {
         return 0.0;
     }
@@ -112,17 +112,16 @@ double get_distance_between_trains(train_position_t *train1, train_position_t *t
  * Calculate time until train completely clears a track section
  * Section is defined by start and end positions
  */
-double time_to_clear_section(train_position_t *train_pos, 
+double time_to_clear_section(train_data_t *train, 
                             double section_start, 
-                            double section_end, 
-                            double speed) {
-    if (train_pos == NULL || speed <= 0.0) {
+                            double section_end) {
+    if (train == NULL || train->current_speed <= 0.0) {
         return -1.0;
     }
 
     // Train rear must clear the section (pass end position)
     // Time = (section_end - rear_position) / speed
-    double time_to_clear = (section_end - train_pos->rear_position) / speed;
+    double time_to_clear = (section_end - train->rear_position) / train->current_speed;
     
     // If already cleared or will never reach (negative speed), return -1
     if (time_to_clear < 0.0) {
@@ -133,67 +132,36 @@ double time_to_clear_section(train_position_t *train_pos,
 }
 
 /**
- * Update track state with all train positions
- * Iterates through trains and updates their positions on the track
- */
-track_state_t update_track_state(track_state_t *track_state, 
-                                 train_data_t trains[], 
-                                 int num_trains,
-                                 time_t current_time) {
-    if (track_state == NULL || trains == NULL) {
-        return *track_state;
-    }
-
-    track_state_t updated_state = *track_state;
-    updated_state.num_trains = 0;
-
-    // Update position for each train on this track
-    for (int i = 0; i < num_trains && i < MAX_TRAINS; i++) {
-        if (trains[i].track_id == track_state->track_id) {
-            // This train is on this track
-            if (updated_state.num_trains < MAX_TRAINS) {
-                updated_state.trains[updated_state.num_trains] = 
-                    update_train_position(&track_state->trains[updated_state.num_trains], 
-                                        &trains[i], 
-                                        current_time);
-                updated_state.num_trains++;
-            }
-        }
-    }
-
-    return updated_state;
-}
-
-/**
  * Calculate track occupancy percentage
- * Occupancy = (total_train_length / track_length) × 100
+ * Occupancy = (total_train_length_on_track / track_length) × 100
  */
-double get_track_occupancy(track_state_t *track_state) {
-    if (track_state == NULL || track_state->track_length <= 0) {
+double get_track_occupancy(track_data_t *track) {
+    if (track == NULL || track->length <= 0) {
         return 0.0;
     }
 
     double occupied_length = 0.0;
 
     // Sum up all train lengths that are on the track
-    for (int i = 0; i < track_state->num_trains; i++) {
-        train_position_t *pos = &track_state->trains[i];
-        
-        // Calculate the length of train that occupies this track
-        // Clamp front to track_length and rear to 0
-        double front = pos->front_position;
-        double rear = pos->rear_position;
-        
-        if (front > 0 && rear < (double)track_state->track_length) {
-            // Train is partially or fully on the track
-            double start = (rear < 0) ? 0 : rear;
-            double end = (front > (double)track_state->track_length) ? 
-                        (double)track_state->track_length : front;
-            occupied_length += (end - start);
+    for (int i = 0; i < track->num_trains && i < MAX_TRAINS; i++) {
+        train_data_t *train = track->trains[i];
+        if (train != NULL) {
+            // Calculate the length of train that occupies this track
+            // Clamp front to track_length and rear to 0
+            double front = train->front_position;
+            double rear = train->rear_position;
+            
+            if (front > 0 && rear < (double)track->length) {
+                // Train is partially or fully on the track
+                double start = (rear < 0) ? 0 : rear;
+                double end = (front > (double)track->length) ? 
+                            (double)track->length : front;
+                occupied_length += (end - start);
+            }
         }
     }
 
-    double occupancy_percent = (occupied_length / (double)track_state->track_length) * 100.0;
+    double occupancy_percent = (occupied_length / (double)track->length) * 100.0;
     
     // Clamp to 0-100%
     if (occupancy_percent > 100.0) {
@@ -210,22 +178,22 @@ double get_track_occupancy(track_state_t *track_state) {
  * Calculate when the next train will reach a specific position on track
  * Returns time in seconds until train's front reaches the position
  */
-double time_until_train_at_position(track_state_t *track_state, double position) {
-    if (track_state == NULL || track_state->num_trains == 0) {
+double time_until_train_at_position(track_data_t *track, double position) {
+    if (track == NULL || track->num_trains == 0) {
         return -1.0;
     }
 
     double min_time = -1.0;
 
-    for (int i = 0; i < track_state->num_trains; i++) {
-        train_position_t *pos = &track_state->trains[i];
+    for (int i = 0; i < track->num_trains && i < MAX_TRAINS; i++) {
+        train_data_t *train = track->trains[i];
         
-        if (pos->speed <= 0.0) {
-            continue;  // Train not moving
+        if (train == NULL || train->current_speed <= 0.0) {
+            continue;  // Train not available or not moving
         }
 
         // Time for train front to reach position: time = (position - current_front) / speed
-        double time_needed = (position - pos->front_position) / pos->speed;
+        double time_needed = (position - train->front_position) / train->current_speed;
         
         if (time_needed >= 0.0) {
             // This train will reach the position in the future
