@@ -1,14 +1,12 @@
 #include "train_state_machine.h"
 #include <stdio.h>
 #include "ipc_client.h"
+#include "ipc_protocol.h"
+#include "system_constants.h"
 
-void init_train(train_t *train, int id) {
-    train->train_id = id;
-    train->current_track = -1;
-    train->state = STATE_IDLE;
-}
-
-void update_train(train_t *train) {
+// Update the train state based on the current state and interactions with the track manager
+// TODO fix this
+void update_train(track_data_t *train) {
     switch (train->state) {
         case STATE_IDLE:
             train->state = STATE_REQUESTING;
@@ -20,7 +18,7 @@ void update_train(train_t *train) {
                 train->state = STATE_MOVING;
             }
             break;
-        case STATE_MOVING:
+        case STATE_MOVING: // TODO this just instantly releases after aquiring the track
             printf("Train %d is moving on track %d\n", train->train_id, train->current_track);
             train->state = STATE_RELEASING;
             break;
