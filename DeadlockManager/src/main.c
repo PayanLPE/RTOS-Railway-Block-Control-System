@@ -119,6 +119,7 @@ int main(int argc, char *argv[]) {
         // Process message based on type
         switch (msg.type) {
             case MSG_REQUEST_TRACK:
+                // TODO if accepted return the time of entry to track and track speed, trains will change for arrival
                 if (request_track(msg.train_id, msg.track_id)) {
                     reply.type = MSG_ACK;
                     printf("Train %d acquired track %d\n", msg.train_id, msg.track_id);
