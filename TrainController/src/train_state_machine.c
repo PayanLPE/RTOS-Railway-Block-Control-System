@@ -1,16 +1,12 @@
 #include "train_state_machine.h"
 #include <stdio.h>
 #include "ipc_client.h"
-
-// Initialize the train data
-void init_train(train_t *train, int id) {
-    train->train_id = id;
-    train->current_track = -1; // -1 means no track
-    train->state = STATE_IDLE;
-}
+#include "ipc_protocol.h"
+#include "system_constants.h"
 
 // Update the train state based on the current state and interactions with the track manager
-void update_train(train_t *train) {
+// TODO fix this
+void update_train(track_data_t *train) {
     switch (train->state) {
         case STATE_IDLE:
             train->state = STATE_REQUESTING;
