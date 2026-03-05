@@ -2,12 +2,14 @@
 #include <stdio.h>
 #include "ipc_client.h"
 
+// Initialize the train data
 void init_train(train_t *train, int id) {
     train->train_id = id;
-    train->current_track = -1;
+    train->current_track = -1; // -1 means no track
     train->state = STATE_IDLE;
 }
 
+// Update the train state based on the current state and interactions with the track manager
 void update_train(train_t *train) {
     switch (train->state) {
         case STATE_IDLE:
@@ -20,7 +22,7 @@ void update_train(train_t *train) {
                 train->state = STATE_MOVING;
             }
             break;
-        case STATE_MOVING:
+        case STATE_MOVING: // TODO this just instantly releases after aquiring the track
             printf("Train %d is moving on track %d\n", train->train_id, train->current_track);
             train->state = STATE_RELEASING;
             break;
