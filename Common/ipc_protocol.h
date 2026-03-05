@@ -30,11 +30,15 @@ typedef struct {
     int track_id;
 } ipc_message_t;
 
+// Forward declaration for track_data_t, prevents cirular dependency issues with request_record_t
+typedef struct track_data_s track_data_t;
+
 // Track data
 // TODO make this into a linked list structure to point to neighboring tracks
-typedef struct {
+typedef struct track_data_s {
     int track_id;
-    int trains_id[MAX_TRAINS]; // List of trains on the tracks in order
+    train_data_t* trains[MAX_TRAINS]; // List of pointers to actual train data on this track
+    int num_trains; // Number of trains currently on this track
     int length;
     int direction; // Direction of all trains on the track
     int endpoints[MAX_TRACK_ENDPOINTS]; // List of track IDs that are connected to this track (for routing purposes)
@@ -54,16 +58,21 @@ typedef struct {
 // Train data
 typedef struct {
     int train_id;
-    int track_id; // Current track the train is on,. -1 if not on any track
+    int track_id; // Current track the train is on, -1 if not on any track
     int destination; // Destination track the train wants to go to (TODO needs routing algorithm)
     
     // TODO might change when we make track data a linked list
     // TODO needs routing algorithm which depends on linked list struct
     int route[MAX_TRACK_CHANGES];
-    int speed; // Speed of the train (for future use, not currently implemented)
-    int length; // Length of the train (for future use, not currently implemented)
-    // Don't need distance since we can compute it based on entry time and speed
-    // Assumes constant speed, which is not realistic but simplifies the problem for now
+    int speed; // Speed of the train in mm/s
+    int length; // Length of the train in mm
+    
+    // ====== Physics Engine Data ======
+    // Train position on track
+    double front_position;      // Position of train front from track start (mm)
+    double rear_position;       // Position of train rear from track start (mm)
+    time_t entry_time;          // When train entered current track (seconds)
+    double current_speed;       // Current speed of train (mm/s) - may differ from nominal speed
 } train_data_t;
 
 
