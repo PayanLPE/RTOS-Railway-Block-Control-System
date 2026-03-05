@@ -2,17 +2,22 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <pthread.h>
 #include <sys/neutrino.h>
 #include <sys/dispatch.h>
 
 #include "ipc_protocol.h"
 #include "resource_manager.h"
+#include "physics_engine.h"
 
 #define CONFIG_LINE_MAX 256
 
 // Global track storage
 track_data_t track_list[MAX_TRACKS];
 int track_count = 0;
+
+// Mutex protecting the resource manager
+pthread_mutex_t track_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // Load track topology from configuration file
 // Format per line:
@@ -77,7 +82,8 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    // Initialize track ownership table TODO this might not be needed
+    // Initialize track ownership table
+    // TODO this might not be needed
     init_resource_manager();
 
     // Create communication channel
@@ -93,6 +99,7 @@ int main(int argc, char *argv[]) {
 
     // Main server loop
     // TODO make this fun on tick formulation
+    // TODO use mutex, cond var, etc
     while (1) {
         // Wait for incoming messages from trains
         rcvid = MsgReceive(chid, &msg, sizeof(msg), NULL);
@@ -105,6 +112,9 @@ int main(int argc, char *argv[]) {
         reply.type = MSG_DENY;
         reply.train_id = msg.train_id;
         reply.track_id = msg.track_id;
+
+        // Lock track for processing
+        pthread_mutex_lock(&track_mutex);
 
         // Process message based on type
         switch (msg.type) {
@@ -126,11 +136,14 @@ int main(int argc, char *argv[]) {
                 break;
         }
 
-        // Send reply back to train
-        MsgReply(rcvid, 0, &reply, sizeof(reply));
-
         // Debug: show current allocation table
         print_resource_status();
+
+        // Release track after processing
+        pthread_mutex_unlock(&track_mutex);
+
+        // Send reply back to train
+        MsgReply(rcvid, 0, &reply, sizeof(reply));
     }
 
     // TODO remove this, Cleanup (unreachable in normal execution)
