@@ -1,0 +1,61 @@
+classDiagram
+    direction LR
+
+    namespace Client_Train {
+        class TrainController {
+            <<Process>>
+            +run_simulation()
+        }
+        class TrainStateMachine {
+            <<Module>>
+            +update_state()
+        }
+        class PhysicsEngine {
+            <<Module>>
+            +calculate_occupancy()
+        }
+        class RoutingEngine {
+            <<Module>>
+            +calculate_shortest_path()
+        }
+        class IPCClient {
+            <<Module>>
+            +send_request()
+            +send_release()
+        }
+    }
+
+    namespace Server_RTOS {
+        class DeadlockManager {
+            <<Process>>
+            +process_requests()
+        }
+        class TrackManager {
+            <<Module>>
+            +get_topology()
+        }
+        class DeadlockPreventionEngine {
+            <<Module>>
+            +evaluate_deadlock()
+        }
+        class ResourceManager {
+            <<Module>>
+            +allocate_track()
+            +free_track()
+        }
+    }
+
+    %% Client Operations
+    TrainController --> TrainStateMachine : manages
+    TrainStateMachine --> PhysicsEngine : uses
+    TrainStateMachine --> RoutingEngine : uses
+    TrainStateMachine --> IPCClient : calls
+
+    %% Server Operations
+    DeadlockManager --> TrackManager : queries
+    DeadlockManager --> DeadlockPreventionEngine : delegates
+    DeadlockManager --> ResourceManager : executes
+
+    %% Interprocess Communication (Synchronous)
+    IPCClient --> DeadlockManager : 1. QNX MsgSend (Block Request)
+    DeadlockManager --> IPCClient : 2. QNX MsgReply (Grant/Deny)
