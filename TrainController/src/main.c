@@ -197,8 +197,3 @@ int main(int argc, char *argv[]) {
     ChannelDestroy(chid);
     return 0;
 }
-
-    // TODO Parent waits for children (optional)
-    while (wait(NULL) > 0);
-    return 0;
-}

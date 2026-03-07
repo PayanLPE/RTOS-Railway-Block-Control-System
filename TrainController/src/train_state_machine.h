@@ -11,7 +11,7 @@ typedef enum {
     STATE_RELEASING
 } train_state_t;
 
-void init_train(track_data_t *train, int id);
-void update_train(track_data_t *train);
+void init_train(train_data_t *train, int id);
+void update_train(train_data_t *train);
 
 #endif // TRAIN_STATE_MACHINE_H
