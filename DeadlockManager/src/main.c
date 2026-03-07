@@ -2,13 +2,18 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <errno.h>
 #include <pthread.h>
 #include <sys/neutrino.h>
 #include <sys/dispatch.h>
+#include <sys/iofunc.h>
+#include <sys/netmgr.h>
 
 #include "ipc_protocol.h"
 #include "resource_manager.h"
 #include "physics_engine.h"
+
+#define DEADLOCK_MANAGER_NAME "DeadlockManager"
 
 #define CONFIG_LINE_MAX 256
 
@@ -23,11 +28,7 @@ int active_train_count = 0;
 // Mutex protecting the resource manager
 pthread_mutex_t track_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-// TrainController connection info
-// TODO: These need to match the actual TrainController PID and CHID
-// In a real system, these would be discovered through a name service or configuration
-#define TRAIN_CONTROLLER_PID 5678   // Must match TrainController's actual PID
-#define TRAIN_CONTROLLER_CHID 2     // Must match TrainController's actual CHID
+#define TRAIN_CONTROLLER_NAME "TrainController"
 
 // Query train data from TrainController and store locally
 train_data_t *get_or_create_train_data(int train_id) {
@@ -44,10 +45,10 @@ train_data_t *get_or_create_train_data(int train_id) {
         return NULL;
     }
 
-    // Connect to TrainController
-    int coid = ConnectAttach(0, TRAIN_CONTROLLER_PID, TRAIN_CONTROLLER_CHID, 0, 0);
+    // Connect to TrainController by name
+    int coid = name_open(TRAIN_CONTROLLER_NAME, 0);
     if (coid == -1) {
-        printf("Failed to connect to TrainController for train %d\n", train_id);
+        printf("Failed to connect to TrainController for train %d: %s\n", train_id, strerror(errno));
         return NULL;
     }
 
@@ -146,16 +147,18 @@ int main(int argc, char *argv[]) {
     // TODO this might not be needed
     init_resource_manager();
 
-    // Create communication channel
-    chid = ChannelCreate(0);
-    if (chid == -1) {
-        perror("ChannelCreate failed");
+    // Attach a name to our channel for discovery
+    name_attach_t *attach = name_attach(NULL, DEADLOCK_MANAGER_NAME, 0);
+    if (attach == NULL) {
+        perror("name_attach failed");
         return 1;
     }
+    chid = attach->chid;
 
     printf("\nDeadlockManager running...\n");
     printf("PID: %d\n", getpid());
-    printf("CHID: %d\n\n", chid);
+    printf("CHID: %d\n", chid);
+    printf("Name: %s\n\n", DEADLOCK_MANAGER_NAME);
 
     // Main server loop
     // TODO make this fun on tick formulation
@@ -247,6 +250,6 @@ int main(int argc, char *argv[]) {
     }
 
     // TODO remove this, Cleanup (unreachable in normal execution)
-    ChannelDestroy(chid);
+    name_detach(attach, 0);
     return 0;
 }
