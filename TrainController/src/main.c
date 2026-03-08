@@ -25,17 +25,30 @@ pthread_mutex_t train_mutex = PTHREAD_MUTEX_INITIALIZER;
 void *ipc_server_thread(void *arg) {
     int chid = *(int *)arg;
     int rcvid;
-    train_query_message_t msg;
+    union {
+        struct _pulse pulse;
+        train_query_message_t msg;
+    } recv;
     train_query_message_t reply;
 
     printf("TrainController IPC server started (CHID: %d)\n", chid);
 
     while (1) {
         // Wait for incoming messages
-        rcvid = MsgReceive(chid, &msg, sizeof(msg), NULL);
+        rcvid = MsgReceive(chid, &recv, sizeof(recv), NULL);
         if (rcvid == -1) {
             continue;
         }
+
+        // Pulses are not application messages; ignore/handle them explicitly.
+        if (rcvid == 0) {
+            if (recv.pulse.code == _PULSE_CODE_DISCONNECT) {
+                ConnectDetach(recv.pulse.scoid);
+            }
+            continue;
+        }
+
+        train_query_message_t msg = recv.msg;
 
         // Default reply
         reply.type = MSG_DENY;
