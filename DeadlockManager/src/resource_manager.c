@@ -29,26 +29,47 @@ void init_resource_manager() {
 // TODO this should accept if the trains are going the same direction and there isnt a train already waiting to go the opposite direction
 bool request_track(int train_id, int track_id) {
     if (track_id < 0 || track_id >= TRACK_COUNT) {
+        printf("Train %d: track_id %d out of bounds [0, %d)\n", train_id, track_id, TRACK_COUNT);
         return false;
     }
 
     track_data_t *track = &track_list[track_id];
     time_t current_time = time(NULL);
 
+    printf("Train %d requesting track %d: track_id=%d, num_trains=%d\n", 
+           train_id, track_id, track->track_id, track->num_trains);
+
     // If track has no trains currently, accept immediately
     if (track->num_trains == 0) {
         track_table[track_id] = train_id;
+        printf("Track %d empty, granting to train %d\n", track_id, train_id);
         return true;
+    }
+
+    // Check if any train is currently entering the track (blocking entrance)
+    for (int i = 0; i < track->num_trains; i++) {
+        train_data_t *train = track->trains[i];
+        if (train != NULL) {
+            // If a train's front hasn't cleared its own length, entrance is blocked
+            if (train->front_position < (double)train->length * 2.0) {
+                printf("Train %d: denied track %d (entrance blocked by train %d at pos %.0fmm)\n",
+                       train_id, track_id, train->train_id, train->front_position);
+                return false;
+            }
+        }
     }
 
     // Update positions of all trains on the track
     if (update_trains_on_track(track, current_time) != 0) {
+        printf("Train %d: error updating train positions on track %d\n", train_id, track_id);
         return false;  // Error updating positions
     }
 
     // Check track occupancy - if over 80%, deny request
     double occupancy = get_track_occupancy(track);
+    printf("Train %d: track %d occupancy %.1f%%\n", train_id, track_id, occupancy);
     if (occupancy > 80.0) {
+        printf("Train %d: denied track %d (occupancy too high)\n", train_id, track_id);
         return false;
     }
 
@@ -80,6 +101,8 @@ bool request_track(int train_id, int track_id) {
 
     // Check if there's enough space at the end of the track
     if (min_distance_to_end < safe_distance) {
+        printf("Train %d: denied track %d (insufficient space: %.1f < %.1f)\n", 
+               train_id, track_id, min_distance_to_end, safe_distance);
         return false;  // Not enough space
     }
 
@@ -102,6 +125,8 @@ bool request_track(int train_id, int track_id) {
 
     // Accept the request - train can enter safely
     track_table[track_id] = train_id;
+    printf("Train %d: granted track %d (wait time %.1f seconds)\n", 
+           train_id, track_id, time_to_safe_entry);
     return true;
 }
 

@@ -1,0 +1,8 @@
+# train_id start_track_id destination_track_id speed_mm_per_s length_mm
+# Test scenario: 3 trains competing for shared track 2 (bottleneck)
+# Train 1: Track 0 -> Track 2 (shared) -> Track 4
+1 0 4 500 180
+# Train 2: Track 1 -> Track 2 (shared) -> Track 5 
+2 1 5 480 200
+# Train 3: Track 0 -> Track 2 (shared) -> Track 5 (same entry as train 1)
+3 0 5 520 170

@@ -1,0 +1,19 @@
+# Railway bottleneck topology - multiple tracks converge to shared track 2
+# track_id length direction endpoint1 endpoint2 endpoint3 endpoint4
+# 
+# Topology:  Track 0 \
+#                      -> Track 2 (SHARED BOTTLENECK) -> Track 4
+#            Track 1 /                                  Track 5
+#
+# Track 0: Entry track A (connects to shared track 2)
+0 3000 1 2 -1 -1 -1
+# Track 1: Entry track B (connects to shared track 2)
+1 3000 1 2 -1 -1 -1
+# Track 2: SHARED BOTTLENECK (connects to tracks 4 and 5)
+2 2000 1 4 5 -1 -1
+# Track 3: Unused/maintenance track
+3 3500 1 -1 -1 -1 -1
+# Track 4: Exit track A (from shared track 2)
+4 3000 1 -1 -1 -1 -1
+# Track 5: Exit track B (from shared track 2)
+5 3000 1 -1 -1 -1 -1

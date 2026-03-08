@@ -2,13 +2,18 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <errno.h>
 #include <pthread.h>
 #include <sys/neutrino.h>
 #include <sys/dispatch.h>
+#include <sys/iofunc.h>
+#include <sys/netmgr.h>
 
 #include "ipc_protocol.h"
 #include "resource_manager.h"
 #include "physics_engine.h"
+
+#define DEADLOCK_MANAGER_NAME "DeadlockManager"
 
 #define CONFIG_LINE_MAX 256
 
@@ -23,11 +28,7 @@ int active_train_count = 0;
 // Mutex protecting the resource manager
 pthread_mutex_t track_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-// TrainController connection info
-// TODO: These need to match the actual TrainController PID and CHID
-// In a real system, these would be discovered through a name service or configuration
-#define TRAIN_CONTROLLER_PID 5678   // Must match TrainController's actual PID
-#define TRAIN_CONTROLLER_CHID 2     // Must match TrainController's actual CHID
+#define TRAIN_CONTROLLER_NAME "TrainController"
 
 // Query train data from TrainController and store locally
 train_data_t *get_or_create_train_data(int train_id) {
@@ -44,10 +45,10 @@ train_data_t *get_or_create_train_data(int train_id) {
         return NULL;
     }
 
-    // Connect to TrainController
-    int coid = ConnectAttach(0, TRAIN_CONTROLLER_PID, TRAIN_CONTROLLER_CHID, 0, 0);
+    // Connect to TrainController by name
+    int coid = name_open(TRAIN_CONTROLLER_NAME, 0);
     if (coid == -1) {
-        printf("Failed to connect to TrainController for train %d\n", train_id);
+        printf("Failed to connect to TrainController for train %d: %s\n", train_id, strerror(errno));
         return NULL;
     }
 
@@ -81,6 +82,8 @@ train_data_t *get_or_create_train_data(int train_id) {
 // Format per line:
 //     track_id length direction endpoint1 endpoint2 endpoint3 endpoint4
 int load_track_data(const char *filename) {
+    printf("Loading track data from: %s\n", filename);
+    
     // Open config file
     FILE *file = fopen(filename, "r");
     if (!file) {
@@ -90,15 +93,20 @@ int load_track_data(const char *filename) {
 
     // Loop through config lines
     char line[CONFIG_LINE_MAX];
+    int line_num = 0;
     while (fgets(line, sizeof(line), file)) {
+        line_num++;
+        
         // Skip comments or empty lines
-        if (line[0] == '#' || strlen(line) < 3)
+        if (line[0] == '#' || strlen(line) < 3) {
+            printf("  Line %d: skipped (comment or empty)\n", line_num);
             continue;
+        }
 
         // Parse track data
         track_data_t track;
         if (sscanf(line, "%d %d %d %d %d %d %d", &track.track_id, &track.length, &track.direction, &track.endpoints[0], &track.endpoints[1], &track.endpoints[2], &track.endpoints[3]) != 7) {
-            printf("Invalid track line: %s\n", line);
+            printf("  Line %d: INVALID format: %s", line_num, line);
             continue;
         }
 
@@ -110,17 +118,20 @@ int load_track_data(const char *filename) {
         init_track_queue(&track);
 
         if (track.track_id < 0 || track.track_id >= MAX_TRACKS) {
-            printf("Invalid track ID: %d\n", track.track_id);
+            printf("  Line %d: INVALID track_id %d (must be 0-%d)\n", line_num, track.track_id, MAX_TRACKS-1);
             continue;
         }
 
         // Add track to list of tracks
         track_list[track.track_id] = track;
         track_count++;
-        printf("Loaded track %d\n", track.track_id);
+        printf("  Line %d: ✓ Loaded track %d (length=%dmm, direction=%d, endpoints=[%d,%d,%d,%d])\n",
+               line_num, track.track_id, track.length, track.direction,
+               track.endpoints[0], track.endpoints[1], track.endpoints[2], track.endpoints[3]);
     }
 
     fclose(file);
+    printf("Track loading complete: %d tracks loaded\n\n", track_count);
     return 1;
 }
 
@@ -146,16 +157,18 @@ int main(int argc, char *argv[]) {
     // TODO this might not be needed
     init_resource_manager();
 
-    // Create communication channel
-    chid = ChannelCreate(0);
-    if (chid == -1) {
-        perror("ChannelCreate failed");
+    // Attach a name to our channel for discovery
+    name_attach_t *attach = name_attach(NULL, DEADLOCK_MANAGER_NAME, 0);
+    if (attach == NULL) {
+        perror("name_attach failed");
         return 1;
     }
+    chid = attach->chid;
 
     printf("\nDeadlockManager running...\n");
     printf("PID: %d\n", getpid());
-    printf("CHID: %d\n\n", chid);
+    printf("CHID: %d\n", chid);
+    printf("Name: %s\n\n", DEADLOCK_MANAGER_NAME);
 
     // Main server loop
     // TODO make this fun on tick formulation
@@ -247,6 +260,6 @@ int main(int argc, char *argv[]) {
     }
 
     // TODO remove this, Cleanup (unreachable in normal execution)
-    ChannelDestroy(chid);
+    name_detach(attach, 0);
     return 0;
 }

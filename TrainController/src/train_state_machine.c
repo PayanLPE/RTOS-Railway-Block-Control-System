@@ -1,31 +1,37 @@
 #include "train_state_machine.h"
 #include <stdio.h>
+#include <string.h>
 #include "ipc_client.h"
 #include "ipc_protocol.h"
 #include "system_constants.h"
 
-// Update the train state based on the current state and interactions with the track manager
-// TODO fix this
-void update_train(track_data_t *train) {
-    switch (train->state) {
-        case STATE_IDLE:
-            train->state = STATE_REQUESTING;
-            break;
-        case STATE_REQUESTING:
-            // Try to acquire next track
-            if (request_track_from_manager(train->train_id, 0)) { // simple demo: always request track 0
-                train->current_track = 0;
-                train->state = STATE_MOVING;
-            }
-            break;
-        case STATE_MOVING: // TODO this just instantly releases after aquiring the track
-            printf("Train %d is moving on track %d\n", train->train_id, train->current_track);
-            train->state = STATE_RELEASING;
-            break;
-        case STATE_RELEASING:
-            release_track_to_manager(train->train_id, train->current_track);
-            train->current_track = -1;
-            train->state = STATE_IDLE;
-            break;
+void init_train(train_data_t *train, int id) {
+    if (train == NULL) {
+        return;
+    }
+
+    memset(train, 0, sizeof(*train));
+    train->train_id = id;
+    train->track_id = INVALID_TRACK;
+}
+
+// Minimal update loop: request a demo track when idle, otherwise release it.
+void update_train(train_data_t *train) {
+    if (train == NULL) {
+        return;
+    }
+
+    if (train->track_id == INVALID_TRACK) {
+        const int requested_track = 0;
+        if (request_track_from_manager(train->train_id, requested_track)) {
+            train->track_id = requested_track;
+            printf("Train %d acquired track %d\n", train->train_id, train->track_id);
+        }
+        return;
+    }
+
+    printf("Train %d is moving on track %d\n", train->train_id, train->track_id);
+    if (release_track_to_manager(train->train_id, train->track_id)) {
+        train->track_id = INVALID_TRACK;
     }
 }

@@ -132,6 +132,40 @@ double time_to_clear_section(train_data_t *train,
 }
 
 /**
+ * Update all train positions on a track and drop trains that have fully exited.
+ */
+int update_trains_on_track(track_data_t *track, time_t current_time) {
+    if (track == NULL) {
+        return -1;
+    }
+
+    int write_idx = 0;
+    for (int i = 0; i < track->num_trains && i < MAX_TRAINS; i++) {
+        train_data_t *train = track->trains[i];
+        if (train == NULL) {
+            continue;
+        }
+
+        if (update_train_position(train, current_time) != 0) {
+            return -1;
+        }
+
+        if (!has_train_left_track(train, track->length)) {
+            track->trains[write_idx++] = train;
+        } else {
+            train->track_id = -1;
+        }
+    }
+
+    for (int i = write_idx; i < MAX_TRAINS; i++) {
+        track->trains[i] = NULL;
+    }
+    track->num_trains = write_idx;
+
+    return 0;
+}
+
+/**
  * Calculate track occupancy percentage
  * Occupancy = (total_train_length_on_track / track_length) × 100
  */
@@ -210,28 +244,20 @@ double time_until_train_at_position(track_data_t *track, double position) {
  * Compute the distance a train has traveled on a track
  * Based on entry time, speed, and length
  */
-int compute_distance(track_data_t track_data, train_data_t train_data) {
-    // Find the entry time by looking through request records
-    time_t entry_time = time(NULL);
-    
-    for (int i = 0; i < track_data.priority_queue_size; i++) {
-        if (track_data.requests[i].train_id == train_data.train_id) {
-            entry_time = mktime(&track_data.requests[i].expected_request_time);
-            break;
-        }
+int compute_distance(train_data_t *train) {
+    if (train == NULL) {
+        return 0;
     }
 
-    // Calculate elapsed time
     time_t now = time(NULL);
-    double elapsed_time = difftime(now, entry_time);
+    double elapsed_time = difftime(now, train->entry_time);
+    if (elapsed_time < 0.0) {
+        return 0;
+    }
 
-    // Calculate distance: distance = speed × time
-    double distance_traveled = calculate_distance_traveled(
-        (double)train_data.speed, 
-        elapsed_time
-    );
-
-    return (int)distance_traveled;  // Return as integer (in mm)
+    double speed = (train->current_speed > 0.0) ? train->current_speed : (double)train->speed;
+    double distance_traveled = calculate_distance_traveled(speed, elapsed_time);
+    return (int)distance_traveled;
 }
 
 // Updates track data on every tick (train locations)
@@ -247,12 +273,13 @@ track_data_t update_track_data(track_data_t track_data) {
     // - Train speed
     // - Elapsed time since entry
     
-    for (int i = 0; i < MAX_TRAINS; i++) {
-        if (track_data.trains_id[i] != -1) {
-            // TODO: Update train position using physics engine
-            // This would call update_train_position() for each train
-            // and update any collision detection or boundary checks
+    for (int i = 0; i < track_data.num_trains && i < MAX_TRAINS; i++) {
+        train_data_t *train = track_data.trains[i];
+        if (train == NULL) {
+            continue;
         }
+
+        (void)update_train_position(train, current_time);
     }
     
     return track_data;

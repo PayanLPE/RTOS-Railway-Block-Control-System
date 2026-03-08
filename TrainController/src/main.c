@@ -2,10 +2,15 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
+#include <errno.h>
 #include <sys/neutrino.h>
 #include <sys/wait.h>
+#include <sys/dispatch.h>
 #include <pthread.h>
 #include "ipc_protocol.h"
+
+#define TRAIN_CONTROLLER_NAME "TrainController"
+#define DEADLOCK_MANAGER_NAME "DeadlockManager"
 
 #define CONFIG_LINE_MAX 256
 
@@ -16,25 +21,34 @@ int train_count = 0;
 // Mutex protecting train data
 pthread_mutex_t train_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-// TODO change this
-#define DEADLOCK_MANAGER_PID 1234   // Replace with actual PID
-#define DEADLOCK_MANAGER_CHID 1     // Replace with actual CHID
-
 // IPC server function to handle queries from DeadlockManager
 void *ipc_server_thread(void *arg) {
     int chid = *(int *)arg;
     int rcvid;
-    train_query_message_t msg;
+    union {
+        struct _pulse pulse;
+        train_query_message_t msg;
+    } recv;
     train_query_message_t reply;
 
     printf("TrainController IPC server started (CHID: %d)\n", chid);
 
     while (1) {
         // Wait for incoming messages
-        rcvid = MsgReceive(chid, &msg, sizeof(msg), NULL);
+        rcvid = MsgReceive(chid, &recv, sizeof(recv), NULL);
         if (rcvid == -1) {
             continue;
         }
+
+        // Pulses are not application messages; ignore/handle them explicitly.
+        if (rcvid == 0) {
+            if (recv.pulse.code == _PULSE_CODE_DISCONNECT) {
+                ConnectDetach(recv.pulse.scoid);
+            }
+            continue;
+        }
+
+        train_query_message_t msg = recv.msg;
 
         // Default reply
         reply.type = MSG_DENY;
@@ -75,10 +89,10 @@ void *ipc_server_thread(void *arg) {
 void run_train_process(train_data_t train) {
     printf("Train %d starting at track %d heading to %d\n", train.train_id, train.track_id, train.destination);
 
-    // Connect to DeadlockManager
-    int coid = ConnectAttach(0, DEADLOCK_MANAGER_PID, DEADLOCK_MANAGER_CHID, 0, 0);
+    // Connect to DeadlockManager by name
+    int coid = name_open(DEADLOCK_MANAGER_NAME, 0);
     if (coid == -1) {
-        perror("ConnectAttach failed");
+        printf("Train %d: Failed to connect to DeadlockManager: %s\n", train.train_id, strerror(errno));
         exit(1);
     }
 
@@ -122,12 +136,13 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    // Create IPC channel for DeadlockManager queries
-    int chid = ChannelCreate(0);
-    if (chid == -1) {
-        perror("ChannelCreate failed");
+    // Attach a name to our channel for discovery
+    name_attach_t *attach = name_attach(NULL, TRAIN_CONTROLLER_NAME, 0);
+    if (attach == NULL) {
+        perror("name_attach failed");
         return 1;
     }
+    int chid = attach->chid;
 
     // Start IPC server thread
     pthread_t server_thread;
@@ -136,7 +151,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    printf("TrainController starting... (PID: %d, CHID: %d)\n", getpid(), chid);
+    printf("TrainController starting... (PID: %d, CHID: %d, Name: %s)\n", getpid(), chid, TRAIN_CONTROLLER_NAME);
 
     // Open config file
     FILE *file = fopen(argv[1], "r");
@@ -194,11 +209,6 @@ int main(int argc, char *argv[]) {
     while (wait(NULL) > 0);
 
     // Cleanup
-    ChannelDestroy(chid);
-    return 0;
-}
-
-    // TODO Parent waits for children (optional)
-    while (wait(NULL) > 0);
+    name_detach(attach, 0);
     return 0;
 }

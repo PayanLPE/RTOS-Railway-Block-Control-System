@@ -5,7 +5,6 @@
 #include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <time.h>
 #include <string.h>
 
 // TODO do we need this? should later replace with congestion percentage computations
@@ -32,32 +31,12 @@ typedef struct {
     int track_id;
 } ipc_message_t;
 
-// Train data query/response message
-typedef struct {
-    message_type_t type;
-    int train_id;
-    train_data_t train_data;  // Full train data for responses
-} train_query_message_t;
-
-// Forward declaration for track_data_t, prevents cirular dependency issues with request_record_t
+// Forward declarations for shared train/track request types.
 typedef struct track_data_s track_data_t;
-
-// Track data
-// TODO make this into a linked list structure to point to neighboring tracks
-typedef struct track_data_s {
-    int track_id;
-    train_data_t* trains[MAX_TRAINS]; // List of pointers to actual train data on this track
-    int num_trains; // Number of trains currently on this track
-    int length;
-    int direction; // Direction of all trains on the track
-    int endpoints[MAX_TRACK_ENDPOINTS]; // List of track IDs that are connected to this track (for routing purposes)
-    // Priority queue of track requests, sorted by expected request time (soonest first)
-    request_record_t requests[MAX_TRACK_REQUESTS];
-    int priority_queue_size; // Number of requests in the priority queue
-} track_data_t;
+typedef struct train_data_s train_data_t;
 
 // Request data for tracks
-typedef struct {
+typedef struct request_record_s {
     int train_id;
     track_data_t *current_track; // Current track the train is on
     struct tm expected_request_time; // when the train needs the track
@@ -65,7 +44,7 @@ typedef struct {
 } request_record_t;
 
 // Train data
-typedef struct {
+typedef struct train_data_s {
     int train_id;
     int track_id; // Current track the train is on, -1 if not on any track
     int destination; // Destination track the train wants to go to (TODO needs routing algorithm)
@@ -83,6 +62,30 @@ typedef struct {
     time_t entry_time;          // When train entered current track (seconds)
     double current_speed;       // Current speed of train (mm/s) - may differ from nominal speed
 } train_data_t;
+
+// Track data
+// TODO make this into a linked list structure to point to neighboring tracks
+typedef struct track_data_s {
+    int track_id;
+    train_data_t* trains[MAX_TRAINS]; // List of pointers to actual train data on this track
+    int num_trains; // Number of trains currently on this track
+    int length;
+    int direction; // Direction of all trains on the track
+    int endpoints[MAX_TRACK_ENDPOINTS]; // List of track IDs that are connected to this track (for routing purposes)
+    // Priority queue of track requests, sorted by expected request time (soonest first)
+    request_record_t requests[MAX_TRACK_REQUESTS];
+    int priority_queue_size; // Number of requests in the priority queue
+} track_data_t;
+
+// Train data query/response message
+typedef struct {
+    message_type_t type;
+    int train_id;
+    train_data_t train_data;  // Full train data for responses
+} train_query_message_t;
+
+// Forward declaration for helper used by request-priority calculation.
+static time_t get_track_next_available_time(track_data_t *track);
 
 
 
@@ -116,7 +119,6 @@ static int compute_request_priority(request_record_t *req) {
     
     // Get the track's next available time based on current queue
     time_t track_next_available = get_track_next_available_time(req->current_track);
-    double time_until_track_available = difftime(track_next_available, current_actual);
     
     // Buffer time between trains (in seconds) - configurable
     const int BUFFER_TIME = 30; // 30 seconds buffer between trains
@@ -203,7 +205,7 @@ static time_t get_track_next_available_time(track_data_t *track) {
 
 
 // Initializes the track's request queue
-void init_track_queue(track_data_t *track) {
+static inline void init_track_queue(track_data_t *track) {
     track->priority_queue_size = 0;
 }
 
@@ -211,7 +213,7 @@ void init_track_queue(track_data_t *track) {
 
 // Enqueues a track request into the track's priority queue
 // Returns 0 on success, 1 on failure
-int enqueue_track_request(track_data_t *track, request_record_t req) {
+static inline int enqueue_track_request(track_data_t *track, request_record_t req) {
     // Deny if no space in the queue
     if (track->priority_queue_size >= MAX_TRACK_REQUESTS) return 1;
 
@@ -250,7 +252,7 @@ int enqueue_track_request(track_data_t *track, request_record_t req) {
 // Dequeues the highest priority request from the track's priority queue
 // I.E. Train is now on the track and no longer is a request or got rerouted
 // Returns 0 on success, 1 on failure
-int dequeue_track_request(track_data_t *track) {
+static inline int dequeue_track_request(track_data_t *track) {
     // Deny if no requests in the queue
     if (track->priority_queue_size == 0) return 1;
 
@@ -267,7 +269,7 @@ int dequeue_track_request(track_data_t *track) {
 
 
 // Optional: Helper function to print the queue order
-void print_track_queue(track_data_t *track) {
+static inline void print_track_queue(track_data_t *track) {
     printf("Track %d Queue (size=%d):\n", track->track_id, track->priority_queue_size);
     for (int i = 0; i < track->priority_queue_size; i++) {
         time_t req_time = mktime(&track->requests[i].expected_request_time);
