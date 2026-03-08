@@ -82,6 +82,8 @@ train_data_t *get_or_create_train_data(int train_id) {
 // Format per line:
 //     track_id length direction endpoint1 endpoint2 endpoint3 endpoint4
 int load_track_data(const char *filename) {
+    printf("Loading track data from: %s\n", filename);
+    
     // Open config file
     FILE *file = fopen(filename, "r");
     if (!file) {
@@ -91,15 +93,20 @@ int load_track_data(const char *filename) {
 
     // Loop through config lines
     char line[CONFIG_LINE_MAX];
+    int line_num = 0;
     while (fgets(line, sizeof(line), file)) {
+        line_num++;
+        
         // Skip comments or empty lines
-        if (line[0] == '#' || strlen(line) < 3)
+        if (line[0] == '#' || strlen(line) < 3) {
+            printf("  Line %d: skipped (comment or empty)\n", line_num);
             continue;
+        }
 
         // Parse track data
         track_data_t track;
         if (sscanf(line, "%d %d %d %d %d %d %d", &track.track_id, &track.length, &track.direction, &track.endpoints[0], &track.endpoints[1], &track.endpoints[2], &track.endpoints[3]) != 7) {
-            printf("Invalid track line: %s\n", line);
+            printf("  Line %d: INVALID format: %s", line_num, line);
             continue;
         }
 
@@ -111,17 +118,20 @@ int load_track_data(const char *filename) {
         init_track_queue(&track);
 
         if (track.track_id < 0 || track.track_id >= MAX_TRACKS) {
-            printf("Invalid track ID: %d\n", track.track_id);
+            printf("  Line %d: INVALID track_id %d (must be 0-%d)\n", line_num, track.track_id, MAX_TRACKS-1);
             continue;
         }
 
         // Add track to list of tracks
         track_list[track.track_id] = track;
         track_count++;
-        printf("Loaded track %d\n", track.track_id);
+        printf("  Line %d: ✓ Loaded track %d (length=%dmm, direction=%d, endpoints=[%d,%d,%d,%d])\n",
+               line_num, track.track_id, track.length, track.direction,
+               track.endpoints[0], track.endpoints[1], track.endpoints[2], track.endpoints[3]);
     }
 
     fclose(file);
+    printf("Track loading complete: %d tracks loaded\n\n", track_count);
     return 1;
 }
 
