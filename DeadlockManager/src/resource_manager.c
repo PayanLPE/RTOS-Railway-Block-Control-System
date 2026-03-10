@@ -27,10 +27,17 @@ void init_resource_manager() {
 // Now uses physics engine to determine safe entry times and collision avoidance
 // TODO return data containing priority number (num of trains ahead), wait time, etc
 // TODO this should accept if the trains are going the same direction and there isnt a train already waiting to go the opposite direction
-bool request_track(int train_id, int track_id) {
+bool request_track(train_data_t *train, int track_id) {
+    int train_id = train->train_id;
     if (track_id < 0 || track_id >= TRACK_COUNT) {
         printf("Train %d: track_id %d out of bounds [0, %d)\n", train_id, track_id, TRACK_COUNT);
         return false;
+    }
+
+    // If train is already on a track, release it first
+    if (train->track_id != -1 && train->track_id != track_id) {
+        release_track(train_id, train->track_id);
+        printf("Train %d released old track %d\n", train_id, train->track_id);
     }
 
     track_data_t *track = &track_list[track_id];

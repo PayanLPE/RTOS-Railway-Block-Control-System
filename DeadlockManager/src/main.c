@@ -8,6 +8,7 @@
 #include <sys/dispatch.h>
 #include <sys/iofunc.h>
 #include <sys/netmgr.h>
+#include <_NTO_TCTL.h>  // For _msg_info
 
 #include "ipc_protocol.h"
 #include "resource_manager.h"
@@ -24,6 +25,9 @@ int track_count = 0;
 // Local storage for active trains (while they're on tracks)
 train_data_t active_trains[MAX_TRAINS];
 int active_train_count = 0;
+
+// Active train connections for sending position updates
+// Note: Trains now have named channels, so we don't need to store scoids
 
 // Mutex protecting the resource manager
 pthread_mutex_t track_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -75,6 +79,41 @@ train_data_t *get_or_create_train_data(int train_id) {
     } else {
         printf("TrainController denied train data request for train %d\n", train_id);
         return NULL;
+    }
+}
+
+// Send position updates to all connected trains
+void send_position_updates(time_t tick_time) {
+    for (int i = 0; i < active_train_count; i++) {
+        train_data_t *train = &active_trains[i];
+
+        // Connect to the train's channel
+        char train_name[32];
+        sprintf(train_name, "Train%d", train->train_id);
+        int train_coid = name_open(train_name, 0);
+        if (train_coid == -1) {
+            printf("Failed to connect to train %d for position update: %s\n", train->train_id, strerror(errno));
+            continue;
+        }
+
+        // Create position update message
+        position_update_message_t update_msg;
+        update_msg.type = MSG_POSITION_UPDATE;
+        update_msg.train_id = train->train_id;
+        update_msg.track_id = train->track_id;
+        update_msg.track_length = track_list[train->track_id].length;
+        update_msg.front_position = train->front_position;
+        update_msg.rear_position = train->rear_position;
+        update_msg.current_speed = train->current_speed;
+        update_msg.tick_time = tick_time;
+
+        // Send the update and expect no reply
+        if (MsgSend(train_coid, &update_msg, sizeof(update_msg), NULL, 0) == -1) {
+            printf("Failed to send position update to train %d: %s\n", train->train_id, strerror(errno));
+        }
+
+        // Close the connection
+        ConnectDetach(train_coid);
     }
 }
 
@@ -170,27 +209,38 @@ int main(int argc, char *argv[]) {
     printf("CHID: %d\n", chid);
     printf("Name: %s\n\n", DEADLOCK_MANAGER_NAME);
 
-    // Main server loop
-    // TODO make this fun on tick formulation
-    // TODO use mutex, cond var, etc
-    time_t last_update = time(NULL);
+    // Main server loop with tick-based updates
+    time_t last_tick = time(NULL);
+    unsigned long long tick_count = 0;
     while (1) {
-        // Periodic physics update (every 100ms)
+        // Tick-based updates (every 10ms for 100 ticks/second)
         time_t current_time = time(NULL);
-        if (difftime(current_time, last_update) >= 0.1) {  // 100ms
+        if (difftime(current_time, last_tick) >= 0.01) {  // 10ms tick
+            tick_count++;
+
             // Update all tracks with physics
             for (int i = 0; i < track_count; i++) {
                 if (track_list[i].track_id >= 0) {
                     track_list[i] = update_track_data(track_list[i]);
                 }
             }
-            last_update = current_time;
+
+            // Send position updates to all connected trains
+            send_position_updates(current_time);
+
+            last_tick = current_time;
         }
 
-        // Wait for incoming messages from trains
-        rcvid = MsgReceive(chid, &msg, sizeof(msg), NULL);
-        if (rcvid == -1)
-            continue;
+        // Wait for incoming messages from trains (with timeout to allow ticks)
+        struct timespec timeout = {0, 1000000};  // 1ms timeout
+        rcvid = MsgReceive(chid, &msg, sizeof(msg), &timeout);
+        if (rcvid == -1) {
+            if (errno == ETIMEDOUT) {
+                continue;  // Timeout, loop back to check for ticks
+            } else {
+                continue;  // Other error
+            }
+        }
 
         ipc_message_t reply;
 
@@ -211,7 +261,7 @@ int main(int argc, char *argv[]) {
                 if (train == NULL) {
                     reply.type = MSG_DENY;
                     printf("Train %d denied track %d (no train data available)\n", msg.train_id, msg.track_id);
-                } else if (request_track(msg.train_id, msg.track_id)) {
+                } else if (request_track(train, msg.track_id)) {
                     // Request accepted - add train to track and initialize physics
                     track_data_t *track = &track_list[msg.track_id];
 
