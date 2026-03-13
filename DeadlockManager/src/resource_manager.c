@@ -14,6 +14,16 @@ extern int track_count;
 // Resource table: -1 = free, else train_id
 static int track_table[TRACK_COUNT];
 
+static uint64_t get_request_time_ns(void) {
+    struct timespec current_time;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &current_time) != 0) {
+        return 0;
+    }
+
+    return ((uint64_t)current_time.tv_sec * 1000000000ULL) + (uint64_t)current_time.tv_nsec;
+}
+
 // Initialize the resource manager by marking all tracks as free
 // TODO read a file/database to initialize a bunch of tracks, also create an endpoint so we can add/remove tracks maybe?
 // TODO trains will request upcoming tracks in advance, holds a priority list per track for trains
@@ -41,7 +51,7 @@ bool request_track(train_data_t *train, int track_id) {
     }
 
     track_data_t *track = &track_list[track_id];
-    time_t current_time = time(NULL);
+    uint64_t current_time_ns = get_request_time_ns();
 
     printf("Train %d requesting track %d: track_id=%d, num_trains=%d\n", 
            train_id, track_id, track->track_id, track->num_trains);
@@ -67,7 +77,7 @@ bool request_track(train_data_t *train, int track_id) {
     }
 
     // Update positions of all trains on the track
-    if (update_trains_on_track(track, current_time) != 0) {
+    if (update_trains_on_track(track, current_time_ns) != 0) {
         printf("Train %d: error updating train positions on track %d\n", train_id, track_id);
         return false;  // Error updating positions
     }

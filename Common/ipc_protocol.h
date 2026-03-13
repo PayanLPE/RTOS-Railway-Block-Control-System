@@ -60,7 +60,7 @@ typedef struct train_data_s {
     // Train position on track
     double front_position;      // Position of train front from track start (mm)
     double rear_position;       // Position of train rear from track start (mm)
-    time_t entry_time;          // When train entered current track (seconds)
+    uint64_t entry_time_ns;     // When train entered current track (monotonic ns)
     double current_speed;       // Current speed of train (mm/s) - may differ from nominal speed
 } train_data_t;
 
@@ -94,7 +94,8 @@ typedef struct {
     double front_position;      // Position of train front from track start (mm)
     double rear_position;       // Position of train rear from track start (mm)
     double current_speed;       // Current speed of train (mm/s)
-    time_t tick_time;           // Time of this tick
+    uint64_t tick_time_ns;      // Monotonic time for this tick
+    unsigned long long tick_count;
 } position_update_message_t;
 
 // Forward declaration for helper used by request-priority calculation.

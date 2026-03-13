@@ -4,6 +4,8 @@
 #include <math.h>
 #include <string.h>
 
+#define NSEC_PER_SEC 1000000000ULL
+
 // ====================================================================================================
 // Physics Engine Implementation
 // ====================================================================================================
@@ -12,6 +14,16 @@
  * Initialize train position when it enters a track
  * Sets front_position to 0, rear_position to -length, and records entry time
  */
+uint64_t get_current_time_ns(void) {
+    struct timespec current_time;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &current_time) != 0) {
+        return 0;
+    }
+
+    return ((uint64_t)current_time.tv_sec * NSEC_PER_SEC) + (uint64_t)current_time.tv_nsec;
+}
+
 int init_train_on_track(train_data_t *train, double speed) {
     if (train == NULL || speed < 0.0) {
         return -1;
@@ -19,7 +31,7 @@ int init_train_on_track(train_data_t *train, double speed) {
 
     train->front_position = 0.0;              // Front starts at track beginning
     train->rear_position = -(double)train->length;  // Rear is at negative position
-    train->entry_time = time(NULL);           // Current time
+    train->entry_time_ns = get_current_time_ns();
     train->current_speed = speed;             // Set the speed
     
     return 0;
@@ -40,13 +52,17 @@ double calculate_distance_traveled(double speed, double elapsed_time) {
  * Update train position based on current time
  * Uses kinematics: position = initial_position + (speed × elapsed_time)
  */
-int update_train_position(train_data_t *train, time_t current_time) {
+int update_train_position(train_data_t *train, uint64_t current_time_ns) {
     if (train == NULL) {
         return -1;
     }
 
+    if (current_time_ns < train->entry_time_ns) {
+        return -1;
+    }
+
     // Calculate elapsed time since train entered track (in seconds)
-    double elapsed_time = difftime(current_time, train->entry_time);
+    double elapsed_time = (double)(current_time_ns - train->entry_time_ns) / (double)NSEC_PER_SEC;
     
     if (elapsed_time < 0.0) {
         return -1;  // Invalid time
@@ -134,7 +150,7 @@ double time_to_clear_section(train_data_t *train,
 /**
  * Update all train positions on a track and drop trains that have fully exited.
  */
-int update_trains_on_track(track_data_t *track, time_t current_time) {
+int update_trains_on_track(track_data_t *track, uint64_t current_time_ns) {
     if (track == NULL) {
         return -1;
     }
@@ -146,7 +162,7 @@ int update_trains_on_track(track_data_t *track, time_t current_time) {
             continue;
         }
 
-        if (update_train_position(train, current_time) != 0) {
+        if (update_train_position(train, current_time_ns) != 0) {
             return -1;
         }
 
@@ -249,11 +265,12 @@ int compute_distance(train_data_t *train) {
         return 0;
     }
 
-    time_t now = time(NULL);
-    double elapsed_time = difftime(now, train->entry_time);
-    if (elapsed_time < 0.0) {
+    uint64_t current_time_ns = get_current_time_ns();
+    if (current_time_ns < train->entry_time_ns) {
         return 0;
     }
+
+    double elapsed_time = (double)(current_time_ns - train->entry_time_ns) / (double)NSEC_PER_SEC;
 
     double speed = (train->current_speed > 0.0) ? train->current_speed : (double)train->speed;
     double distance_traveled = calculate_distance_traveled(speed, elapsed_time);
@@ -261,13 +278,7 @@ int compute_distance(train_data_t *train) {
 }
 
 // Updates track data on every tick (train locations)
-track_data_t update_track_data(track_data_t track_data) {
-    // This function is called every tick to update train positions on the track
-    // In a real-time system, this would be triggered by a periodic timer
-    
-    // Get current time
-    time_t current_time = time(NULL);
-    
+track_data_t update_track_data(track_data_t track_data, uint64_t current_time_ns) {
     // For each train on this track, update its position based on:
     // - Entry time into the track
     // - Train speed
@@ -279,7 +290,7 @@ track_data_t update_track_data(track_data_t track_data) {
             continue;
         }
 
-        (void)update_train_position(train, current_time);
+        (void)update_train_position(train, current_time_ns);
     }
     
     return track_data;

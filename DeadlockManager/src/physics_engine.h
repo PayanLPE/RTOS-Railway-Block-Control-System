@@ -16,6 +16,8 @@
  */
 int init_train_on_track(train_data_t *train, double speed);
 
+uint64_t get_current_time_ns(void);
+
 /**
  * Calculate distance traveled by a train based on elapsed time and speed
  * @param speed: Speed of the train in mm/s
@@ -28,10 +30,10 @@ double calculate_distance_traveled(double speed, double elapsed_time);
  * Update train position based on current time
  * Calculates front and rear positions based on speed and elapsed time
  * @param train: Pointer to train_data_t structure to update
- * @param current_time: Current time in seconds
+ * @param current_time_ns: Current monotonic time in nanoseconds
  * @return 0 on success, -1 on failure
  */
-int update_train_position(train_data_t *train, time_t current_time);
+int update_train_position(train_data_t *train, uint64_t current_time_ns);
 
 /**
  * Check if train has left the track (rear position >= track length)
@@ -72,10 +74,10 @@ double time_to_clear_section(train_data_t *train,
 /**
  * Update all train positions on a track
  * @param track: Pointer to track_data_t structure
- * @param current_time: Current system time
+ * @param current_time_ns: Current monotonic time in nanoseconds
  * @return 0 on success, -1 on failure
  */
-int update_trains_on_track(track_data_t *track, time_t current_time);
+int update_trains_on_track(track_data_t *track, uint64_t current_time_ns);
 
 /**
  * Get the occupancy percentage of a track
@@ -101,6 +103,6 @@ double time_until_train_at_position(track_data_t *track, double position);
 int compute_distance(train_data_t *train);
 
 // Updates track data on every tick (train locations)
-track_data_t update_track_data(track_data_t track_data);
+track_data_t update_track_data(track_data_t track_data, uint64_t current_time_ns);
 
 #endif // PHYSICS_ENGINE_H
