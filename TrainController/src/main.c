@@ -15,6 +15,10 @@
 #define DEADLOCK_MANAGER_NAME "DeadlockManager"
 
 #define CONFIG_LINE_MAX 256
+#define TICK_LOG_INTERVAL 25ULL
+#define REQUEST_AFTER_TICKS 40ULL
+#define COMPLETE_AFTER_TICKS 20ULL
+#define DEFAULT_TRAIN_LENGTH_MM 1
 
 // TrainController is the source of truth for train metadata.
 train_data_t train_list[MAX_TRAINS];
@@ -81,7 +85,7 @@ void *ipc_server_thread(void *arg) {
 }
 
 void run_train_process(train_data_t train) {
-    printf("Train %d starting at track %d heading to %d\n", train.train_id, train.track_id, train.destination);
+    printf("[TRAIN %d] start track=%d destination=%d\n", train.train_id, train.track_id, train.destination);
 
     char train_name[32];
     sprintf(train_name, "Train%d", train.train_id);
@@ -100,10 +104,7 @@ void run_train_process(train_data_t train) {
 
     int current_track = train.track_id;
     int destination_track = train.destination;
-    int current_track_length = 0;
-    double current_front_pos = 0.0;
-    double current_rear_pos = 0.0;
-    double current_speed = 0.0;
+    unsigned long long ticks_on_current_track = 0;
     bool has_requested_destination = false;
 
     ipc_message_t msg;
@@ -123,7 +124,10 @@ void run_train_process(train_data_t train) {
         exit(1);
     }
 
-    printf("Train %d acquired initial track %d\n", train.train_id, current_track);
+    printf("[TRAIN %d] acquired initial track=%d\n", train.train_id, current_track);
+
+    unsigned long long last_logged_tick = 0;
+    int last_logged_track = current_track;
 
     // Each train process listens for position updates and decides when to request next track.
     while (1) {
@@ -146,22 +150,32 @@ void run_train_process(train_data_t train) {
 
         position_update_message_t update_msg = recv.update;
         if (update_msg.type == MSG_POSITION_UPDATE && update_msg.train_id == train.train_id) {
-            current_track = update_msg.track_id;
-            current_track_length = update_msg.track_length;
-            current_front_pos = update_msg.front_position;
-            current_rear_pos = update_msg.rear_position;
-            current_speed = update_msg.current_speed;
+            if (current_track != update_msg.track_id) {
+                current_track = update_msg.track_id;
+                ticks_on_current_track = 0;
+                has_requested_destination = (current_track == destination_track);
+            } else {
+                ticks_on_current_track++;
+            }
 
-            printf("Train %d: Tick %llu - Track %d (len=%dmm), Front=%.0fmm, Rear=%.0fmm, Speed=%.0fmm/s\n",
-                   train.train_id, update_msg.tick_count, current_track, current_track_length,
-                   current_front_pos, current_rear_pos, current_speed);
+                 if (last_logged_tick == 0 ||
+                  update_msg.tick_count - last_logged_tick >= TICK_LOG_INTERVAL ||
+                  current_track != last_logged_track) {
+                  printf("[TICK] train=%d tick=%llu track=%d state_ticks=%llu\n",
+                      train.train_id,
+                      update_msg.tick_count,
+                      current_track,
+                      ticks_on_current_track);
+                  last_logged_tick = update_msg.tick_count;
+                  last_logged_track = current_track;
+                 }
         }
 
         MsgReply(rcvid, 0, NULL, 0);
 
-        // Request destination once front reaches 80% of current track.
-        if (current_track_length > 0 && current_front_pos > (double)current_track_length * 0.8 && !has_requested_destination && current_track != destination_track) {
-            printf("Train %d requesting destination track %d\n", train.train_id, destination_track);
+        // Block model: request next block after spending enough ticks in current block.
+        if (!has_requested_destination && current_track != destination_track && ticks_on_current_track >= REQUEST_AFTER_TICKS) {
+            printf("[TRAIN %d] request destination track=%d\n", train.train_id, destination_track);
 
             msg.type = MSG_REQUEST_TRACK;
             msg.train_id = train.train_id;
@@ -170,16 +184,16 @@ void run_train_process(train_data_t train) {
             if (MsgSend(dm_coid, &msg, sizeof(msg), &reply, sizeof(reply)) == -1) {
                 perror("Failed to request destination track");
             } else if (reply.type == MSG_ACK) {
-                printf("Train %d acquired destination track %d\n", train.train_id, destination_track);
+                printf("[TRAIN %d] acquired destination track=%d\n", train.train_id, destination_track);
                 has_requested_destination = true;
             } else {
-                printf("Train %d denied destination track %d\n", train.train_id, destination_track);
+                printf("[TRAIN %d] denied destination track=%d\n", train.train_id, destination_track);
             }
         }
 
-        // Exit after entering deep enough into destination track.
-        if (current_track == destination_track && current_track_length > 0 && current_front_pos > (double)current_track_length * 0.9) {
-            printf("Train %d reached destination track %d\n", train.train_id, destination_track);
+        // Complete route after enough ticks in destination block.
+        if (current_track == destination_track && ticks_on_current_track >= COMPLETE_AFTER_TICKS) {
+            printf("[TRAIN %d] reached destination track=%d\n", train.train_id, destination_track);
             break;
         }
     }
@@ -224,15 +238,19 @@ int main(int argc, char *argv[]) {
 
         train_data_t train;
         memset(&train, 0, sizeof(train_data_t));
-        if (sscanf(line, "%d %d %d %d %d", &train.train_id, &train.track_id, &train.destination, &train.speed, &train.length) != 5) {
+
+        int parsed = sscanf(line, "%d %d %d %d", &train.train_id, &train.track_id, &train.destination, &train.speed);
+        if (parsed != 4) {
             continue;
         }
+
+        train.length = DEFAULT_TRAIN_LENGTH_MM;
 
         if (train_count < MAX_TRAINS) {
             train_list[train_count] = train;
             train_count++;
-            printf("Loaded train %d: track %d -> %d, speed %d mm/s, length %d mm\n",
-                   train.train_id, train.track_id, train.destination, train.speed, train.length);
+            printf("Loaded train %d: track %d -> %d, speed %d mm/s\n",
+                   train.train_id, train.track_id, train.destination, train.speed);
         } else {
             printf("Warning: Maximum train count reached, skipping train %d\n", train.train_id);
         }

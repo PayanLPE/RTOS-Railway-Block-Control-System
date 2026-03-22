@@ -195,28 +195,23 @@ int suggest_reroute(int blocked_train_id, train_data_t *trains, int train_count,
         return -1;
     }
     
-    // Find least-occupied track that isn't the current destination
-    double min_occupancy = 101.0;
+    // Block model: prefer any free track that isn't current destination.
     int best_track = -1;
-    
+
     for (int i = 0; i < track_count; i++) {
         if (tracks[i].track_id < 0 || tracks[i].track_id == current_destination) {
             continue;  // Skip invalid or current destination
         }
-        
-        double occupancy = get_track_occupancy(&tracks[i]);
-        
-        // Also check if track can reach destination eventually
-        if (occupancy < min_occupancy && occupancy <= 60.0) {
-            min_occupancy = occupancy;
+
+        if (tracks[i].num_trains == 0) {
             best_track = tracks[i].track_id;
+            break;
         }
     }
     
     if (best_track >= 0) {
         *suggested_track = best_track;
-        printf("[REROUTE] Train %d: suggesting alternate track %d (occupancy: %.1f%%)\n",
-               blocked_train_id, best_track, min_occupancy);
+        printf("[REROUTE] train=%d suggest track=%d\n", blocked_train_id, best_track);
         return 0;
     }
     

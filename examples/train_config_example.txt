@@ -1,9 +1,7 @@
-# train_id start_track_id destination_track_id speed_mm_per_s length_mm
-# Movement-first smoke test for QNX timer ticks and position updates.
-# This avoids two trains spawning on the same entry track, so motion is easier to observe.
-# Train 1: starts on track 0 and requests shared track 2 near 80% of track 0
-1 0 2 700 180
-# Train 2: starts on track 1 and requests shared track 2 near 80% of track 1
-2 1 2 650 190
-# Train 3: independent movement on maintenance track to confirm third process updates
-3 3 4 600 170
+# train_id start_track_id destination_track_id speed_mm_per_s
+# SUCCESS CASE (no deadlock cycle)
+# Train 1 and Train 2 request different destination blocks.
+1 0 4 700
+2 1 5 650
+# Train 3 stays in the same block and completes without requesting another block.
+3 3 3 600
