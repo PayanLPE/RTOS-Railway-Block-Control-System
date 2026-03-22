@@ -16,14 +16,12 @@
 
 #define CONFIG_LINE_MAX 256
 
-// Global train storage - TrainController is the authoritative source
+// TrainController is the source of truth for train metadata.
 train_data_t train_list[MAX_TRAINS];
 int train_count = 0;
 
-// Mutex protecting train data
 pthread_mutex_t train_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-// IPC server function to handle queries from DeadlockManager
 void *ipc_server_thread(void *arg) {
     int chid = *(int *)arg;
     int rcvid;
@@ -35,14 +33,14 @@ void *ipc_server_thread(void *arg) {
 
     printf("TrainController IPC server started (CHID: %d)\n", chid);
 
+    // Serve train-data queries from DeadlockManager.
     while (1) {
-        // Wait for incoming messages
         rcvid = MsgReceive(chid, &recv, sizeof(recv), NULL);
         if (rcvid == -1) {
             continue;
         }
 
-        // Pulses are not application messages; ignore/handle them explicitly.
+        // Pulse path (disconnect and other system events).
         if (rcvid == 0) {
             if (recv.pulse.code == _PULSE_CODE_DISCONNECT) {
                 ConnectDetach(recv.pulse.scoid);
@@ -52,16 +50,13 @@ void *ipc_server_thread(void *arg) {
 
         train_query_message_t msg = recv.msg;
 
-        // Default reply
         reply.type = MSG_DENY;
         reply.train_id = msg.train_id;
 
-        // Lock train data for processing
         pthread_mutex_lock(&train_mutex);
 
         switch (msg.type) {
             case MSG_GET_TRAIN_DATA:
-                // Find train data
                 for (int i = 0; i < train_count; i++) {
                     if (train_list[i].train_id == msg.train_id) {
                         reply.type = MSG_TRAIN_DATA_REPLY;
@@ -77,21 +72,17 @@ void *ipc_server_thread(void *arg) {
                 break;
         }
 
-        // Unlock train data
         pthread_mutex_unlock(&train_mutex);
 
-        // Send reply
         MsgReply(rcvid, 0, &reply, sizeof(reply));
     }
 
     return NULL;
 }
 
-// Function to run the train process
 void run_train_process(train_data_t train) {
     printf("Train %d starting at track %d heading to %d\n", train.train_id, train.track_id, train.destination);
 
-    // Attach a name for the train so DeadlockManager can find it
     char train_name[32];
     sprintf(train_name, "Train%d", train.train_id);
     name_attach_t *attach = name_attach(NULL, train_name, 0);
@@ -101,14 +92,12 @@ void run_train_process(train_data_t train) {
     }
     int chid = attach->chid;
 
-    // Connect to DeadlockManager by name
     int dm_coid = name_open(DEADLOCK_MANAGER_NAME, 0);
     if (dm_coid == -1) {
         printf("Train %d: Failed to connect to DeadlockManager: %s\n", train.train_id, strerror(errno));
         exit(1);
     }
 
-    // Current state
     int current_track = train.track_id;
     int destination_track = train.destination;
     int current_track_length = 0;
@@ -117,7 +106,6 @@ void run_train_process(train_data_t train) {
     double current_speed = 0.0;
     bool has_requested_destination = false;
 
-    // Request starting track
     ipc_message_t msg;
     msg.type = MSG_REQUEST_TRACK;
     msg.train_id = train.train_id;
@@ -137,6 +125,7 @@ void run_train_process(train_data_t train) {
 
     printf("Train %d acquired initial track %d\n", train.train_id, current_track);
 
+    // Each train process listens for position updates and decides when to request next track.
     while (1) {
         union {
             struct _pulse pulse;
@@ -170,8 +159,7 @@ void run_train_process(train_data_t train) {
 
         MsgReply(rcvid, 0, NULL, 0);
 
-        // Decision making on each tick
-        // If approaching end of track and haven't requested destination, request it
+        // Request destination once front reaches 80% of current track.
         if (current_track_length > 0 && current_front_pos > (double)current_track_length * 0.8 && !has_requested_destination && current_track != destination_track) {
             printf("Train %d requesting destination track %d\n", train.train_id, destination_track);
 
@@ -189,28 +177,23 @@ void run_train_process(train_data_t train) {
             }
         }
 
-        // If reached destination, exit
+        // Exit after entering deep enough into destination track.
         if (current_track == destination_track && current_track_length > 0 && current_front_pos > (double)current_track_length * 0.9) {
             printf("Train %d reached destination track %d\n", train.train_id, destination_track);
             break;
         }
     }
 
-    // Cleanup
     name_detach(attach, 0);
     ConnectDetach(dm_coid);
 }
 
-// Main function to read config and spawn train processes
-// Usage: ./train_controller <train_config_file>
 int main(int argc, char *argv[]) {
-    // Ensure valid input
     if (argc != 2) {
         printf("Usage: %s <train_config_file>\n", argv[0]);
         return 1;
     }
 
-    // Attach a name to our channel for discovery
     name_attach_t *attach = name_attach(NULL, TRAIN_CONTROLLER_NAME, 0);
     if (attach == NULL) {
         perror("name_attach failed");
@@ -218,7 +201,6 @@ int main(int argc, char *argv[]) {
     }
     int chid = attach->chid;
 
-    // Start IPC server thread
     pthread_t server_thread;
     if (pthread_create(&server_thread, NULL, ipc_server_thread, &chid) != 0) {
         perror("Failed to create IPC server thread");
@@ -227,31 +209,25 @@ int main(int argc, char *argv[]) {
 
     printf("TrainController starting... (PID: %d, CHID: %d, Name: %s)\n", getpid(), chid, TRAIN_CONTROLLER_NAME);
 
-    // Open config file
     FILE *file = fopen(argv[1], "r");
     if (!file) {
         perror("Failed to open config file");
         return 1;
     }
 
-    // Lock train data for modification
     pthread_mutex_lock(&train_mutex);
 
-    // Loop through config lines
     char line[CONFIG_LINE_MAX];
     while (fgets(line, sizeof(line), file)) {
-        // Skip comments and empty lines
         if (line[0] == '#' || strlen(line) < 3)
             continue;
 
-        // Parse train data
         train_data_t train;
         memset(&train, 0, sizeof(train_data_t));
         if (sscanf(line, "%d %d %d %d %d", &train.train_id, &train.track_id, &train.destination, &train.speed, &train.length) != 5) {
             continue;
         }
 
-        // Store train data globally
         if (train_count < MAX_TRAINS) {
             train_list[train_count] = train;
             train_count++;
@@ -261,28 +237,22 @@ int main(int argc, char *argv[]) {
             printf("Warning: Maximum train count reached, skipping train %d\n", train.train_id);
         }
 
-        // Spawn a process for each train
         pid_t pid = fork();
         if (pid == 0) {
-            // CHILD
             run_train_process(train);
             exit(0);
         } else if (pid < 0) {
             perror("fork failed");
         } else {
-            // PARENT
             printf("Spawned Train %d (PID %d)\n", train.train_id, pid);
         }
     }
     fclose(file);
 
-    // Unlock train data
     pthread_mutex_unlock(&train_mutex);
 
-    // Wait for all child processes
     while (wait(NULL) > 0);
 
-    // Cleanup
     name_detach(attach, 0);
     return 0;
 }

@@ -15,7 +15,7 @@ void init_train(train_data_t *train, int id) {
     train->track_id = INVALID_TRACK;
 }
 
-// Minimal update loop: request a demo track when idle, otherwise release it.
+// Demo loop: request one track when idle, release it after a simulated move step.
 void update_train(train_data_t *train) {
     if (train == NULL) {
         return;

@@ -7,137 +7,109 @@
 #include <stdlib.h>
 #include <string.h>
 
-// TODO do we need this? should later replace with congestion percentage computations
 #define MAX_TRACKS 10
 #define MAX_TRAINS 5
-#define MAX_TRACK_ENDPOINTS 4 // I.e. a fork on both sides of a single track >-----<
-#define MAX_TRACK_CHANGES 50 // The number of track changes
-#define MAX_TRACK_REQUESTS 20   // TODO max queued requests per track
+#define MAX_TRACK_ENDPOINTS 4 
+#define MAX_TRACK_CHANGES 50 
+#define MAX_TRACK_REQUESTS 20   
 
-// Message types
+// Shared IPC message types between TrainController and DeadlockManager.
 typedef enum {
     MSG_REQUEST_TRACK,
     MSG_RELEASE_TRACK,
     MSG_ACK,
     MSG_DENY,
-    MSG_GET_TRAIN_DATA,    // DeadlockManager -> TrainController: get train data
-    MSG_TRAIN_DATA_REPLY,  // TrainController -> DeadlockManager: train data response
-    MSG_POSITION_UPDATE     // DeadlockManager -> Train: position update on tick
+    MSG_GET_TRAIN_DATA,    
+    MSG_TRAIN_DATA_REPLY,  
+    MSG_POSITION_UPDATE     
 } message_type_t;
 
-// IPC message structure
 typedef struct {
     message_type_t type;
     int train_id;
     int track_id;
 } ipc_message_t;
 
-// Forward declarations for shared train/track request types.
 typedef struct track_data_s track_data_t;
 typedef struct train_data_s train_data_t;
 
-// Request data for tracks
 typedef struct request_record_s {
     int train_id;
-    track_data_t *current_track; // Current track the train is on
-    struct tm expected_request_time; // when the train needs the track
-    struct tm expected_release_time; // When other trains can advance to the track
+    track_data_t *current_track; 
+    struct tm expected_request_time; 
+    struct tm expected_release_time; 
 } request_record_t;
 
-// Train data
+// Runtime train state that can be exchanged across processes.
 typedef struct train_data_s {
     int train_id;
-    int track_id; // Current track the train is on, -1 if not on any track
-    int destination; // Destination track the train wants to go to (TODO needs routing algorithm)
+    int track_id; 
+    int destination; 
     
-    // TODO might change when we make track data a linked list
-    // TODO needs routing algorithm which depends on linked list struct
     int route[MAX_TRACK_CHANGES];
-    int speed; // Speed of the train in mm/s
-    int length; // Length of the train in mm
+    int speed; 
+    int length; 
     
-    // ====== Physics Engine Data ======
-    // Train position on track
-    double front_position;      // Position of train front from track start (mm)
-    double rear_position;       // Position of train rear from track start (mm)
-    uint64_t entry_time_ns;     // When train entered current track (monotonic ns)
-    double current_speed;       // Current speed of train (mm/s) - may differ from nominal speed
+    double front_position;      
+    double rear_position;       
+    uint64_t entry_time_ns;     
+    double current_speed;       
 } train_data_t;
 
-// Track data
-// TODO make this into a linked list structure to point to neighboring tracks
+// Track model includes active trains plus pending requests.
 typedef struct track_data_s {
     int track_id;
-    train_data_t* trains[MAX_TRAINS]; // List of pointers to actual train data on this track
-    int num_trains; // Number of trains currently on this track
+    train_data_t* trains[MAX_TRAINS]; 
+    int num_trains; 
     int length;
-    int direction; // Direction of all trains on the track
-    int endpoints[MAX_TRACK_ENDPOINTS]; // List of track IDs that are connected to this track (for routing purposes)
-    // Priority queue of track requests, sorted by expected request time (soonest first)
+    int direction; 
+    int endpoints[MAX_TRACK_ENDPOINTS]; 
     request_record_t requests[MAX_TRACK_REQUESTS];
-    int priority_queue_size; // Number of requests in the priority queue
+    int priority_queue_size; 
 } track_data_t;
 
-// Train data query/response message
 typedef struct {
     message_type_t type;
     int train_id;
-    train_data_t train_data;  // Full train data for responses
+    train_data_t train_data;  
 } train_query_message_t;
 
-// Position update message
 typedef struct {
     message_type_t type;
     int train_id;
     int track_id;
-    int track_length;      // Length of current track in mm
-    double front_position;      // Position of train front from track start (mm)
-    double rear_position;       // Position of train rear from track start (mm)
-    double current_speed;       // Current speed of train (mm/s)
-    uint64_t tick_time_ns;      // Monotonic time for this tick
+    int track_length;      
+    double front_position;      
+    double rear_position;       
+    double current_speed;       
+    uint64_t tick_time_ns;      
     unsigned long long tick_count;
 } position_update_message_t;
 
-// Forward declaration for helper used by request-priority calculation.
 static time_t get_track_next_available_time(track_data_t *track);
 
-
-
-// ====================================================================================================
-// Priority Queue
-// ====================================================================================================
-
-// Computes the request priority based on arrival of trains
-// Returns -1 if request cannot be scheduled, otherwise returns priority value
-// Lower return value = higher priority (sooner arrival)
+// Compute scheduling priority from requested arrival and current queue state.
 static int compute_request_priority(request_record_t *req) {
     if (req == NULL || req->current_track == NULL) {
-        return -1; // Invalid request
+        return -1; 
     }
 
     time_t now = time(NULL);
     struct tm *current_time = localtime(&now);
     
-    // Convert tm structs to time_t for easier comparison
     time_t request_time = mktime(&req->expected_request_time);
     time_t current_actual = mktime(current_time);
     
-    // Calculate time until request needed (in seconds)
     double time_until_needed = difftime(request_time, current_actual);
     
-    // If request time is in the past, it's already late
     if (time_until_needed < 0) {
-        // Give it highest priority but still check if it can be scheduled
         time_until_needed = 0;
     }
     
-    // Get the track's next available time based on current queue
     time_t track_next_available = get_track_next_available_time(req->current_track);
     
-    // Buffer time between trains (in seconds) - configurable
-    const int BUFFER_TIME = 30; // 30 seconds buffer between trains
+    const int BUFFER_TIME = 30; 
     
-    // Calculate the earliest this train can be scheduled
     time_t earliest_schedule_time;
     if (track_next_available > current_actual) {
         earliest_schedule_time = track_next_available + BUFFER_TIME;
@@ -145,70 +117,50 @@ static int compute_request_priority(request_record_t *req) {
         earliest_schedule_time = current_actual + BUFFER_TIME;
     }
     
-    // Convert to time_t for comparison
     time_t earliest = mktime(localtime(&earliest_schedule_time));
     time_t requested = mktime(&req->expected_request_time);
     
-    // Calculate the difference between requested and earliest possible
     double schedule_gap = difftime(requested, earliest);
     
-    // If the train wants to arrive before the track is available (+buffer)
     if (schedule_gap < 0) {
-        // Check if we can adjust speed to make it work
-        // Allow up to 20% speedup to fit into schedule
-        double max_speedup_factor = 0.2; // 20% faster
+        double max_speedup_factor = 0.2; 
         
-        // Calculate how much speedup would be needed
-        double time_needed = -schedule_gap; // How much earlier we need it
+        double time_needed = -schedule_gap; 
         double required_speedup = time_needed / time_until_needed;
         
         if (required_speedup <= max_speedup_factor) {
-            // Can speed up to fit - still schedule it
-            // Priority based on adjusted time
             time_t adjusted_time = requested;
             return (int)difftime(adjusted_time, current_actual);
         } else {
-            // Cannot speed up enough - deny request
             return -1;
         }
     }
-    // If the train wants to arrive after track is available
     else {
-        // Check if we can slow down to match schedule (up to 30% slower)
-        double max_slowdown_factor = 0.3; // 30% slower
+        double max_slowdown_factor = 0.3; 
         
         if (schedule_gap > 0) {
             double required_slowdown = schedule_gap / time_until_needed;
             
             if (required_slowdown <= max_slowdown_factor) {
-                // Can slow down to fit - schedule it
-                // Priority based on requested time
                 return (int)difftime(requested, current_actual);
             } else {
-                // Too much slowdown needed - still schedule but with lower priority
-                // Or could return -1 if you want to deny extreme slowdowns
                 return (int)(difftime(earliest, current_actual) + schedule_gap);
             }
         }
     }
     
-    // Default: return time until needed as priority (sooner = higher priority)
     return (int)time_until_needed;
 }
 
 
-
-// Helper function to calculate track's next available time
+// Estimate when a track becomes free based on the latest queued request.
 static time_t get_track_next_available_time(track_data_t *track) {
     if (track == NULL || track->priority_queue_size == 0) {
-        return time(NULL); // Track is available now
+        return time(NULL); 
     }
     
-    // Get the last request in the queue (latest arrival)
     request_record_t *last_req = &track->requests[track->priority_queue_size - 1];
     
-    // Return its request time as the track's next busy time
-    // Add expected duration of track usage
     time_t request_time = mktime(&last_req->expected_request_time);
     time_t release_time = mktime(&last_req->expected_release_time);
     time_t duration = difftime(release_time, request_time);
@@ -217,72 +169,56 @@ static time_t get_track_next_available_time(track_data_t *track) {
 }
 
 
-
-// Initializes the track's request queue
+// Initialize an empty per-track request queue.
 static inline void init_track_queue(track_data_t *track) {
     track->priority_queue_size = 0;
 }
 
 
-
-// Enqueues a track request into the track's priority queue
-// Returns 0 on success, 1 on failure
+// Insert request ordered by expected arrival time (earlier first).
 static inline int enqueue_track_request(track_data_t *track, request_record_t req) {
-    // Deny if no space in the queue
     if (track->priority_queue_size >= MAX_TRACK_REQUESTS) return 1;
 
-    // Compute priority of the new request
     int priority = compute_request_priority(&req);
     
-    // Request declined (unable to schedule with reasonable speed adjustments)
     if (priority == -1) return 1;
 
-    // Find insertion point based on arrival time (sooner = higher priority)
     int insert_pos = 0;
     while (insert_pos < track->priority_queue_size) {
         time_t current_req_time = mktime(&track->requests[insert_pos].expected_request_time);
         time_t new_req_time = mktime(&req.expected_request_time);
         
-        // If current request has later arrival time, insert before it
         if (difftime(current_req_time, new_req_time) > 0) {
             break;
         }
         insert_pos++;
     }
     
-    // Shift lower priority (later arrival) requests down
     for (int i = track->priority_queue_size; i > insert_pos; i--) {
         track->requests[i] = track->requests[i - 1];
     }
     
-    // Insert new request
     track->requests[insert_pos] = req;
     track->priority_queue_size++;
     return 0;
 }
 
 
-
-// Dequeues the highest priority request from the track's priority queue
-// I.E. Train is now on the track and no longer is a request or got rerouted
-// Returns 0 on success, 1 on failure
+// Remove the highest-priority request from the queue front.
 static inline int dequeue_track_request(track_data_t *track) {
-    // Deny if no requests in the queue
     if (track->priority_queue_size == 0) return 1;
 
-    // Shift all requests up the queue (remove first element)
     for (int i = 1; i < track->priority_queue_size; i++) {
         track->requests[i - 1] = track->requests[i];
     }
 
     track->priority_queue_size--;
 
-    return 0; // Return 0 for success
+    return 0; 
 }
 
 
-
-// Optional: Helper function to print the queue order
+// Debug helper to inspect queue ordering.
 static inline void print_track_queue(track_data_t *track) {
     printf("Track %d Queue (size=%d):\n", track->track_id, track->priority_queue_size);
     for (int i = 0; i < track->priority_queue_size; i++) {
@@ -291,4 +227,4 @@ static inline void print_track_queue(track_data_t *track) {
     }
 }
 
-#endif // IPC_PROTOCOL_H
+#endif
