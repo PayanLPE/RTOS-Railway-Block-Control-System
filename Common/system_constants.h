@@ -1,10 +1,10 @@
 #ifndef SYSTEM_CONSTANTS_H
 #define SYSTEM_CONSTANTS_H
 
-// TODO create a UI to set these values?
-#define TRACK_COUNT 6       // number of track sections
-#define TRAIN_COUNT 3       // number of trains
-#define MAX_RETRIES 3       // max retries for deadlock prevention
+// Baseline simulation limits used by both controller and manager.
+#define TRACK_COUNT 6       
+#define TRAIN_COUNT 3       
+#define MAX_RETRIES 3       
 #define INVALID_TRACK -1
 
-#endif // SYSTEM_CONSTANTS_H
+#endif

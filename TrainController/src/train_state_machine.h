@@ -4,6 +4,7 @@
 #include "ipc_protocol.h"
 #include "system_constants.h"
 
+// High-level train lifecycle states for controller-side logic.
 typedef enum {
     STATE_IDLE,
     STATE_REQUESTING,
@@ -14,4 +15,4 @@ typedef enum {
 void init_train(train_data_t *train, int id);
 void update_train(train_data_t *train);
 
-#endif // TRAIN_STATE_MACHINE_H
+#endif
