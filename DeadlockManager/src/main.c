@@ -13,12 +13,15 @@
 #include "ipc_protocol.h"
 #include "resource_manager.h"
 #include "physics_engine.h"
+#include "deadlock_detector.h"
 
 #define DEADLOCK_MANAGER_NAME "DeadlockManager"
 
 #define CONFIG_LINE_MAX 256
 #define TICK_INTERVAL_NS 10000000LL
 #define TICK_PULSE_CODE (_PULSE_CODE_MINAVAIL + 1)
+#define DEADLOCK_LOG_INTERVAL_NS 1000000000ULL
+#define DEFAULT_BLOCK_LENGTH_MM 1000
 
 typedef union {
     struct _pulse pulse;
@@ -33,11 +36,32 @@ int track_count = 0;
 train_data_t active_trains[MAX_TRAINS];
 int active_train_count = 0;
 
+// Train request states for deadlock detection
+train_request_state_t train_request_states[MAX_TRAINS];
+static uint64_t last_deadlock_log_ns = 0;
+static int last_deadlock_train = -1;
 
 // Guards shared track/train state across message and timer paths.
 pthread_mutex_t track_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 #define TRAIN_CONTROLLER_NAME "TrainController"
+
+static int train_is_on_any_track(int train_id) {
+    for (int i = 0; i < track_count; i++) {
+        if (track_list[i].track_id < 0) {
+            continue;
+        }
+
+        for (int j = 0; j < track_list[i].num_trains; j++) {
+            train_data_t *t = track_list[i].trains[j];
+            if (t != NULL && t->train_id == train_id) {
+                return 1;
+            }
+        }
+    }
+
+    return 0;
+}
 
 train_data_t *get_or_create_train_data(int train_id) {
     for (int i = 0; i < active_train_count; i++) {
@@ -82,6 +106,8 @@ train_data_t *get_or_create_train_data(int train_id) {
 }
 
 void send_position_updates(uint64_t tick_time_ns, unsigned long long tick_count) {
+    static int missing_update_warned[MAX_TRAINS] = {0};
+
     for (int i = 0; i < active_train_count; i++) {
         train_data_t *train = &active_trains[i];
 
@@ -94,9 +120,13 @@ void send_position_updates(uint64_t tick_time_ns, unsigned long long tick_count)
         sprintf(train_name, "Train%d", train->train_id);
         int train_coid = name_open(train_name, 0);
         if (train_coid == -1) {
-            printf("Failed to connect to train %d for position update: %s\n", train->train_id, strerror(errno));
+            if (!missing_update_warned[i]) {
+                printf("[WARN] unable to connect for updates: train=%d reason=%s\n", train->train_id, strerror(errno));
+                missing_update_warned[i] = 1;
+            }
             continue;
         }
+        missing_update_warned[i] = 0;
 
         position_update_message_t update_msg;
         update_msg.type = MSG_POSITION_UPDATE;
@@ -137,15 +167,35 @@ int load_track_data(const char *filename) {
         }
 
         track_data_t track;
-        if (sscanf(line, "%d %d %d %d %d %d %d", &track.track_id, &track.length, &track.direction, &track.endpoints[0], &track.endpoints[1], &track.endpoints[2], &track.endpoints[3]) != 7) {
-            printf("  Line %d: INVALID format: %s", line_num, line);
-            continue;
+        memset(&track, 0, sizeof(track_data_t));
+
+        int parsed = sscanf(line, "%d %d %d %d %d %d",
+                            &track.track_id,
+                            &track.direction,
+                            &track.endpoints[0],
+                            &track.endpoints[1],
+                            &track.endpoints[2],
+                            &track.endpoints[3]);
+
+        if (parsed == 6) {
+            track.length = DEFAULT_BLOCK_LENGTH_MM;
+        } else {
+            parsed = sscanf(line, "%d %d %d %d %d %d %d",
+                            &track.track_id,
+                            &track.length,
+                            &track.direction,
+                            &track.endpoints[0],
+                            &track.endpoints[1],
+                            &track.endpoints[2],
+                            &track.endpoints[3]);
+            if (parsed != 7) {
+                printf("  Line %d: INVALID format: %s", line_num, line);
+                continue;
+            }
         }
 
         memset(track.trains, 0, sizeof(track.trains));
         track.num_trains = 0;
-
-        init_track_queue(&track);
 
         if (track.track_id < 0 || track.track_id >= MAX_TRACKS) {
             printf("  Line %d: INVALID track_id %d (must be 0-%d)\n", line_num, track.track_id, MAX_TRACKS-1);
@@ -154,14 +204,69 @@ int load_track_data(const char *filename) {
 
         track_list[track.track_id] = track;
         track_count++;
-        printf("  Line %d: ✓ Loaded track %d (length=%dmm, direction=%d, endpoints=[%d,%d,%d,%d])\n",
-               line_num, track.track_id, track.length, track.direction,
+         printf("  Line %d: ✓ Loaded track %d (direction=%d, endpoints=[%d,%d,%d,%d])\n",
+             line_num, track.track_id, track.direction,
                track.endpoints[0], track.endpoints[1], track.endpoints[2], track.endpoints[3]);
     }
 
     fclose(file);
     printf("Track loading complete: %d tracks loaded\n\n", track_count);
     return 1;
+}
+
+void check_deadlock_and_recover(uint64_t current_time_ns) {
+    // Update train request states based on current track occupancy
+    for (int i = 0; i < active_train_count; i++) {
+        train_data_t *train = &active_trains[i];
+        
+        int holds_track = train->track_id;
+        int wants_track = train_request_states[i].currently_wants_track;
+        if (holds_track < 0) {
+            wants_track = -1;
+        }
+        
+        update_train_request_state(&train_request_states[i], holds_track, wants_track, current_time_ns);
+        
+        // Check if train is stuck
+        if (detect_stuck_train(&train_request_states[i], current_time_ns)) {
+            printf("[STUCK] train=%d waiting>5s\n", train->train_id);
+            
+            // Block-model recovery planning: suggest alternate free block.
+            int suggested_track = -1;
+            if (suggest_reroute(train->train_id, active_trains, active_train_count,
+                               track_list, track_count, train->track_id, &suggested_track) == 0) {
+                printf("[PLAN] train=%d consider-reroute track=%d\n", train->train_id, suggested_track);
+            }
+        }
+    }
+    
+    // Detect deadlocks
+    int deadlock_train = detect_deadlock(train_request_states, active_train_count,
+                                         track_list, track_count);
+    
+    if (deadlock_train >= 0) {
+        if (deadlock_train != last_deadlock_train ||
+            current_time_ns - last_deadlock_log_ns >= DEADLOCK_LOG_INTERVAL_NS) {
+            printf("[DEADLOCK DETECTED] train=%d\n", deadlock_train);
+            print_deadlock_graph(train_request_states, active_train_count);
+            last_deadlock_log_ns = current_time_ns;
+            last_deadlock_train = deadlock_train;
+        }
+        
+        // Try to recover by suggesting reroute
+        for (int i = 0; i < active_train_count; i++) {
+            if (active_trains[i].train_id == deadlock_train) {
+                int suggested_track = -1;
+                if (suggest_reroute(deadlock_train, active_trains, active_train_count,
+                                   track_list, track_count, active_trains[i].track_id, 
+                                   &suggested_track) == 0) {
+                          printf("[RECOVERY] suggest train=%d reroute_track=%d\n",
+                              deadlock_train, suggested_track);
+                }
+                break;
+            }
+        }
+    }
 }
 
 
@@ -177,6 +282,11 @@ int main(int argc, char *argv[]) {
 
     if (!load_track_data(argv[1])) {
         return 1;
+    }
+
+    // Initialize train request states
+    for (int i = 0; i < MAX_TRAINS; i++) {
+        initialize_train_request_state(&train_request_states[i], -1);
     }
 
     init_resource_manager();
@@ -218,10 +328,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    printf("\nDeadlockManager running...\n");
-    printf("PID: %d\n", getpid());
-    printf("CHID: %d\n", chid);
-    printf("Name: %s\n\n", DEADLOCK_MANAGER_NAME);
+    printf("\n[INFO] DeadlockManager running pid=%d chid=%d name=%s\n\n", getpid(), chid, DEADLOCK_MANAGER_NAME);
 
     // Timer pulses drive physics ticks; regular messages handle track requests.
     unsigned long long tick_count = 0;
@@ -246,6 +353,12 @@ int main(int argc, char *argv[]) {
                         }
                     }
                     send_position_updates(current_time_ns, tick_count);
+                    
+                    // Check for deadlocks and stuck trains every 10 ticks
+                    if (tick_count % 10 == 0) {
+                        check_deadlock_and_recover(current_time_ns);
+                    }
+                    
                     pthread_mutex_unlock(&track_mutex);
                     break;
                 }
@@ -267,41 +380,95 @@ int main(int argc, char *argv[]) {
         reply.track_id = recv.msg.track_id;
 
         pthread_mutex_lock(&track_mutex);
+        
+        uint64_t current_time_ns = get_current_time_ns();
 
         switch (recv.msg.type) {
-            case MSG_REQUEST_TRACK:
+            case MSG_REQUEST_TRACK: {
                 train_data_t *train = get_or_create_train_data(recv.msg.train_id);
+
+                if (train != NULL) {
+                    for (int i = 0; i < active_train_count; i++) {
+                        if (active_trains[i].train_id == recv.msg.train_id &&
+                            train_request_states[i].train_id < 0) {
+                            initialize_train_request_state(&train_request_states[i], recv.msg.train_id);
+                            break;
+                        }
+                    }
+                }
+                
+                // Update train request state (now wants this track)
+                for (int i = 0; i < active_train_count; i++) {
+                    if (active_trains[i].train_id == recv.msg.train_id) {
+                        update_train_request_state(&train_request_states[i], 
+                                                   active_trains[i].track_id, 
+                                                   recv.msg.track_id, 
+                                                   current_time_ns);
+                        break;
+                    }
+                }
                 
                 if (train == NULL) {
                     reply.type = MSG_DENY;
-                    printf("Train %d denied track %d (no train data available)\n", recv.msg.train_id, recv.msg.track_id);
+                    printf("[DENY] train=%d track=%d reason=no-train-data\n", recv.msg.train_id, recv.msg.track_id);
                 } else if (request_track(train, recv.msg.track_id)) {
                     track_data_t *track = &track_list[recv.msg.track_id];
-
-                    if (track->num_trains < MAX_TRAINS) {
-                        track->trains[track->num_trains] = train;
-                        track->num_trains++;
-
-                        train->track_id = recv.msg.track_id;
-                        init_train_on_track(train, (double)train->speed);
-
-                        reply.type = MSG_ACK;
-                        printf("Train %d acquired track %d\n", recv.msg.train_id, recv.msg.track_id);
-                    } else {
-                        reply.type = MSG_DENY;
-                        printf("Train %d denied track %d (track full)\n", recv.msg.train_id, recv.msg.track_id);
+                    int old_track_id = train->track_id;
+                    if (old_track_id != -1 && old_track_id != recv.msg.track_id) {
+                        release_track(recv.msg.train_id, old_track_id);
+                        printf("[RELEASE] train=%d track=%d\n", recv.msg.train_id, old_track_id);
                     }
+
+                    // Block model: exactly one train per track.
+                    memset(track->trains, 0, sizeof(track->trains));
+                    track->trains[0] = train;
+                    track->num_trains = 1;
+
+                    train->track_id = recv.msg.track_id;
+
+                    // Update state: now holds this track
+                    for (int i = 0; i < active_train_count; i++) {
+                        if (active_trains[i].train_id == recv.msg.train_id) {
+                            update_train_request_state(&train_request_states[i],
+                                                       recv.msg.track_id,
+                                                       -1,
+                                                       current_time_ns);
+                            break;
+                        }
+                    }
+
+                    reply.type = MSG_ACK;
+                    printf("[GRANT] train=%d track=%d\n", recv.msg.train_id, recv.msg.track_id);
                 } else {
                     reply.type = MSG_DENY;
-                    printf("Train %d denied track %d\n", recv.msg.train_id, recv.msg.track_id);
+                    printf("[DENY] train=%d track=%d\n", recv.msg.train_id, recv.msg.track_id);
+
+                    // If this train holds no track, it likely failed initial admission.
+                    // Mark it inactive so tick path stops trying position updates for it.
+                    if (train != NULL && !train_is_on_any_track(train->train_id)) {
+                        train->track_id = -1;
+                    }
                 }
                 break;
-            case MSG_RELEASE_TRACK:
+            }
+            case MSG_RELEASE_TRACK: {
                 release_track(recv.msg.train_id, recv.msg.track_id);
-                reply.type = MSG_ACK;
-                printf("Train %d released track %d\n", recv.msg.train_id, recv.msg.track_id);
                 
+                // Update train request state: no longer holds this track
+                for (int i = 0; i < active_train_count; i++) {
+                    if (active_trains[i].train_id == recv.msg.train_id) {
+                        update_train_request_state(&train_request_states[i], 
+                                                   -1, 
+                                                   -1, 
+                                                   current_time_ns);
+                        break;
+                    }
+                }
+                
+                reply.type = MSG_ACK;
+                printf("[RELEASE] train=%d track=%d\n", recv.msg.train_id, recv.msg.track_id);
                 break;
+            }
             default:
                 printf("Unknown message type from Train %d\n", recv.msg.train_id);
                 break;

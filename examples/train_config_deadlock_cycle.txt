@@ -1,0 +1,6 @@
+# train_id start_track_id destination_track_id speed_mm_per_s
+# DEADLOCK CASE (cycle)
+# Train 1 holds block 0 and requests block 1.
+1 0 1 900
+# Train 2 holds block 1 and requests block 0.
+2 1 0 900
