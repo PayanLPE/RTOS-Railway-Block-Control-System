@@ -1,0 +1,8 @@
+# train_id start_track_id destination_track_id speed_mm_per_s length_mm
+# Deadlock cycle test: each primary train wants the other's track.
+# Train 1: holds track 0, then requests track 1
+1 0 1 900 180
+# Train 2: holds track 1, then requests track 0
+2 1 0 900 180
+# Optional third train on separate pair to add pressure without blocking cycle pair.
+3 2 3 850 170

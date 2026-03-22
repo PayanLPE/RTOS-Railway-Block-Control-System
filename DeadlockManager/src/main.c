@@ -13,6 +13,7 @@
 #include "ipc_protocol.h"
 #include "resource_manager.h"
 #include "physics_engine.h"
+#include "deadlock_detector.h"
 
 #define DEADLOCK_MANAGER_NAME "DeadlockManager"
 
@@ -33,11 +34,30 @@ int track_count = 0;
 train_data_t active_trains[MAX_TRAINS];
 int active_train_count = 0;
 
+// Train request states for deadlock detection
+train_request_state_t train_request_states[MAX_TRAINS];
 
 // Guards shared track/train state across message and timer paths.
 pthread_mutex_t track_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 #define TRAIN_CONTROLLER_NAME "TrainController"
+
+static int train_is_on_any_track(int train_id) {
+    for (int i = 0; i < track_count; i++) {
+        if (track_list[i].track_id < 0) {
+            continue;
+        }
+
+        for (int j = 0; j < track_list[i].num_trains; j++) {
+            train_data_t *t = track_list[i].trains[j];
+            if (t != NULL && t->train_id == train_id) {
+                return 1;
+            }
+        }
+    }
+
+    return 0;
+}
 
 train_data_t *get_or_create_train_data(int train_id) {
     for (int i = 0; i < active_train_count; i++) {
@@ -164,6 +184,77 @@ int load_track_data(const char *filename) {
     return 1;
 }
 
+void check_deadlock_and_recover(uint64_t current_time_ns) {
+    // Update train request states based on current track occupancy
+    for (int i = 0; i < active_train_count; i++) {
+        train_data_t *train = &active_trains[i];
+        
+        int holds_track = train->track_id;
+        int wants_track = train_request_states[i].currently_wants_track;
+        if (holds_track < 0) {
+            wants_track = -1;
+        }
+        
+        // Simple heuristic: if train is near end of track, it "wants" next track
+        if (train->track_id >= 0 && train->track_id < track_count) {
+            if (train->front_position > (double)track_list[train->track_id].length * 0.7) {
+                // Train is near the end, likely planning to request next track
+                // For now, we don't know what it wants until it explicitly requests
+                wants_track = -1;
+            }
+        }
+        
+        update_train_request_state(&train_request_states[i], holds_track, wants_track, current_time_ns);
+        
+        // Check if train is stuck
+        if (detect_stuck_train(&train_request_states[i], current_time_ns)) {
+            printf("[STUCK] Train %d is stuck (waiting > 5s for track)\n", train->train_id);
+            
+            // Send recovery message to train with suggestion
+            int suggested_track = -1;
+            if (suggest_reroute(train->train_id, active_trains, active_train_count,
+                               track_list, track_count, train->track_id, &suggested_track) == 0) {
+                // Try to send suggestion to train
+                char train_name[32];
+                sprintf(train_name, "Train%d", train->train_id);
+                int train_coid = name_open(train_name, 0);
+                if (train_coid != -1) {
+                    ipc_message_t recovery_msg;
+                    recovery_msg.type = MSG_REQUEST_TRACK;
+                    recovery_msg.train_id = train->train_id;
+                    recovery_msg.track_id = suggested_track;
+                    
+                    MsgSend(train_coid, &recovery_msg, sizeof(recovery_msg), NULL, 0);
+                    ConnectDetach(train_coid);
+                }
+            }
+        }
+    }
+    
+    // Detect deadlocks
+    int deadlock_train = detect_deadlock(train_request_states, active_train_count,
+                                         track_list, track_count);
+    
+    if (deadlock_train >= 0) {
+        printf("[DEADLOCK DETECTED] Train involved: %d\n", deadlock_train);
+        print_deadlock_graph(train_request_states, active_train_count);
+        
+        // Try to recover by suggesting reroute
+        for (int i = 0; i < active_train_count; i++) {
+            if (active_trains[i].train_id == deadlock_train) {
+                int suggested_track = -1;
+                if (suggest_reroute(deadlock_train, active_trains, active_train_count,
+                                   track_list, track_count, active_trains[i].track_id, 
+                                   &suggested_track) == 0) {
+                    printf("[RECOVERY] Suggesting track %d for train %d\n", 
+                           suggested_track, deadlock_train);
+                }
+                break;
+            }
+        }
+    }
+}
+
 
 int main(int argc, char *argv[]) {
     if (argc != 2) {
@@ -177,6 +268,11 @@ int main(int argc, char *argv[]) {
 
     if (!load_track_data(argv[1])) {
         return 1;
+    }
+
+    // Initialize train request states
+    for (int i = 0; i < MAX_TRAINS; i++) {
+        initialize_train_request_state(&train_request_states[i], -1);
     }
 
     init_resource_manager();
@@ -246,6 +342,12 @@ int main(int argc, char *argv[]) {
                         }
                     }
                     send_position_updates(current_time_ns, tick_count);
+                    
+                    // Check for deadlocks and stuck trains every 10 ticks
+                    if (tick_count % 10 == 0) {
+                        check_deadlock_and_recover(current_time_ns);
+                    }
+                    
                     pthread_mutex_unlock(&track_mutex);
                     break;
                 }
@@ -267,10 +369,33 @@ int main(int argc, char *argv[]) {
         reply.track_id = recv.msg.track_id;
 
         pthread_mutex_lock(&track_mutex);
+        
+        uint64_t current_time_ns = get_current_time_ns();
 
         switch (recv.msg.type) {
-            case MSG_REQUEST_TRACK:
+            case MSG_REQUEST_TRACK: {
                 train_data_t *train = get_or_create_train_data(recv.msg.train_id);
+
+                if (train != NULL) {
+                    for (int i = 0; i < active_train_count; i++) {
+                        if (active_trains[i].train_id == recv.msg.train_id &&
+                            train_request_states[i].train_id < 0) {
+                            initialize_train_request_state(&train_request_states[i], recv.msg.train_id);
+                            break;
+                        }
+                    }
+                }
+                
+                // Update train request state (now wants this track)
+                for (int i = 0; i < active_train_count; i++) {
+                    if (active_trains[i].train_id == recv.msg.train_id) {
+                        update_train_request_state(&train_request_states[i], 
+                                                   active_trains[i].track_id, 
+                                                   recv.msg.track_id, 
+                                                   current_time_ns);
+                        break;
+                    }
+                }
                 
                 if (train == NULL) {
                     reply.type = MSG_DENY;
@@ -285,6 +410,17 @@ int main(int argc, char *argv[]) {
                         train->track_id = recv.msg.track_id;
                         init_train_on_track(train, (double)train->speed);
 
+                        // Update state: now holds this track
+                        for (int i = 0; i < active_train_count; i++) {
+                            if (active_trains[i].train_id == recv.msg.train_id) {
+                                update_train_request_state(&train_request_states[i], 
+                                                           recv.msg.track_id, 
+                                                           -1, 
+                                                           current_time_ns);
+                                break;
+                            }
+                        }
+
                         reply.type = MSG_ACK;
                         printf("Train %d acquired track %d\n", recv.msg.train_id, recv.msg.track_id);
                     } else {
@@ -294,14 +430,33 @@ int main(int argc, char *argv[]) {
                 } else {
                     reply.type = MSG_DENY;
                     printf("Train %d denied track %d\n", recv.msg.train_id, recv.msg.track_id);
+
+                    // If this train holds no track, it likely failed initial admission.
+                    // Mark it inactive so tick path stops trying position updates for it.
+                    if (train != NULL && !train_is_on_any_track(train->train_id)) {
+                        train->track_id = -1;
+                    }
                 }
                 break;
-            case MSG_RELEASE_TRACK:
+            }
+            case MSG_RELEASE_TRACK: {
                 release_track(recv.msg.train_id, recv.msg.track_id);
+                
+                // Update train request state: no longer holds this track
+                for (int i = 0; i < active_train_count; i++) {
+                    if (active_trains[i].train_id == recv.msg.train_id) {
+                        update_train_request_state(&train_request_states[i], 
+                                                   -1, 
+                                                   -1, 
+                                                   current_time_ns);
+                        break;
+                    }
+                }
+                
                 reply.type = MSG_ACK;
                 printf("Train %d released track %d\n", recv.msg.train_id, recv.msg.track_id);
-                
                 break;
+            }
             default:
                 printf("Unknown message type from Train %d\n", recv.msg.train_id);
                 break;

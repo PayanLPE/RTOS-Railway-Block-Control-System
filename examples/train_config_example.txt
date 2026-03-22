@@ -1,8 +1,9 @@
 # train_id start_track_id destination_track_id speed_mm_per_s length_mm
-# Test scenario: 3 trains competing for shared track 2 (bottleneck)
-# Train 1: Track 0 -> Track 2 (shared) -> Track 4
-1 0 4 500 180
-# Train 2: Track 1 -> Track 2 (shared) -> Track 5 
-2 1 5 480 200
-# Train 3: Track 0 -> Track 2 (shared) -> Track 5 (same entry as train 1)
-3 0 5 520 170
+# Movement-first smoke test for QNX timer ticks and position updates.
+# This avoids two trains spawning on the same entry track, so motion is easier to observe.
+# Train 1: starts on track 0 and requests shared track 2 near 80% of track 0
+1 0 2 700 180
+# Train 2: starts on track 1 and requests shared track 2 near 80% of track 1
+2 1 2 650 190
+# Train 3: independent movement on maintenance track to confirm third process updates
+3 3 4 600 170

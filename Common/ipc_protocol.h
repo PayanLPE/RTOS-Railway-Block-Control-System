@@ -21,7 +21,8 @@ typedef enum {
     MSG_DENY,
     MSG_GET_TRAIN_DATA,    
     MSG_TRAIN_DATA_REPLY,  
-    MSG_POSITION_UPDATE     
+    MSG_POSITION_UPDATE,
+    MSG_REROUTE_SUGGESTION  // Deadlock recovery: suggestion to take alternate route
 } message_type_t;
 
 typedef struct {
