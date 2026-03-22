@@ -36,9 +36,9 @@ bool request_track(train_data_t *train, int track_id) {
         return false;
     }
 
-    if (train->track_id != -1 && train->track_id != track_id) {
-        release_track(train_id, train->track_id);
-        printf("Train %d released old track %d\n", train_id, train->track_id);
+    if (train->track_id == track_id) {
+        track_table[track_id] = train_id;
+        return true;
     }
 
     track_data_t *track = &track_list[track_id];

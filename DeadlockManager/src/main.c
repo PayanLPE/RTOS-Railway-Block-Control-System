@@ -195,15 +195,6 @@ void check_deadlock_and_recover(uint64_t current_time_ns) {
             wants_track = -1;
         }
         
-        // Simple heuristic: if train is near end of track, it "wants" next track
-        if (train->track_id >= 0 && train->track_id < track_count) {
-            if (train->front_position > (double)track_list[train->track_id].length * 0.7) {
-                // Train is near the end, likely planning to request next track
-                // For now, we don't know what it wants until it explicitly requests
-                wants_track = -1;
-            }
-        }
-        
         update_train_request_state(&train_request_states[i], holds_track, wants_track, current_time_ns);
         
         // Check if train is stuck
@@ -402,8 +393,14 @@ int main(int argc, char *argv[]) {
                     printf("Train %d denied track %d (no train data available)\n", recv.msg.train_id, recv.msg.track_id);
                 } else if (request_track(train, recv.msg.track_id)) {
                     track_data_t *track = &track_list[recv.msg.track_id];
+                    int old_track_id = train->track_id;
 
                     if (track->num_trains < MAX_TRAINS) {
+                        if (old_track_id != -1 && old_track_id != recv.msg.track_id) {
+                            release_track(recv.msg.train_id, old_track_id);
+                            printf("Train %d released old track %d\n", recv.msg.train_id, old_track_id);
+                        }
+
                         track->trains[track->num_trains] = train;
                         track->num_trains++;
 
