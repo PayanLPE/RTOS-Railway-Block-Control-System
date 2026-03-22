@@ -1,8 +1,10 @@
 #include <stdio.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
 #include <errno.h>
+#include <time.h>
 #include <sys/neutrino.h>
 #include <sys/wait.h>
 #include <sys/dispatch.h>
@@ -89,42 +91,114 @@ void *ipc_server_thread(void *arg) {
 void run_train_process(train_data_t train) {
     printf("Train %d starting at track %d heading to %d\n", train.train_id, train.track_id, train.destination);
 
+    // Attach a name for the train so DeadlockManager can find it
+    char train_name[32];
+    sprintf(train_name, "Train%d", train.train_id);
+    name_attach_t *attach = name_attach(NULL, train_name, 0);
+    if (attach == NULL) {
+        perror("name_attach failed");
+        exit(1);
+    }
+    int chid = attach->chid;
+
     // Connect to DeadlockManager by name
-    int coid = name_open(DEADLOCK_MANAGER_NAME, 0);
-    if (coid == -1) {
+    int dm_coid = name_open(DEADLOCK_MANAGER_NAME, 0);
+    if (dm_coid == -1) {
         printf("Train %d: Failed to connect to DeadlockManager: %s\n", train.train_id, strerror(errno));
         exit(1);
     }
 
-    // TODO make this a loop based on tick formulation until the train reaches its destination in which we can kill the process for the train
+    // Current state
+    int current_track = train.track_id;
+    int destination_track = train.destination;
+    int current_track_length = 0;
+    double current_front_pos = 0.0;
+    double current_rear_pos = 0.0;
+    double current_speed = 0.0;
+    bool has_requested_destination = false;
 
-    // TODO this would be based on destination and starting track
-    // Example: Request starting track
+    // Request starting track
     ipc_message_t msg;
     msg.type = MSG_REQUEST_TRACK;
     msg.train_id = train.train_id;
-    msg.track_id = train.track_id;
+    msg.track_id = current_track;
 
     ipc_message_t reply;
 
-    // Check reply
-    if (MsgSend(coid, &msg, sizeof(msg), &reply, sizeof(reply)) == -1) {
+    if (MsgSend(dm_coid, &msg, sizeof(msg), &reply, sizeof(reply)) == -1) {
         perror("MsgSend failed");
         exit(1);
     }
 
-    // Print result of track request
-    if (reply.type == MSG_ACK) {
-        printf("Train %d acquired track %d\n", train.train_id, train.track_id);
-    } else {
-        printf("Train %d denied track %d\n", train.train_id, train.track_id);
+    if (reply.type != MSG_ACK) {
+        printf("Train %d denied initial track %d\n", train.train_id, current_track);
+        exit(1);
     }
 
-    // Infinite movement loop would go here
-    // TODO Replace with tick formulation
+    printf("Train %d acquired initial track %d\n", train.train_id, current_track);
+
     while (1) {
-        sleep(1);
+        union {
+            struct _pulse pulse;
+            position_update_message_t update;
+        } recv;
+
+        int rcvid = MsgReceive(chid, &recv, sizeof(recv), NULL);
+        if (rcvid == -1) {
+            continue;
+        }
+
+        if (rcvid == 0) {
+            if (recv.pulse.code == _PULSE_CODE_DISCONNECT) {
+                ConnectDetach(recv.pulse.scoid);
+            }
+            continue;
+        }
+
+        position_update_message_t update_msg = recv.update;
+        if (update_msg.type == MSG_POSITION_UPDATE && update_msg.train_id == train.train_id) {
+            current_track = update_msg.track_id;
+            current_track_length = update_msg.track_length;
+            current_front_pos = update_msg.front_position;
+            current_rear_pos = update_msg.rear_position;
+            current_speed = update_msg.current_speed;
+
+            printf("Train %d: Tick %llu - Track %d (len=%dmm), Front=%.0fmm, Rear=%.0fmm, Speed=%.0fmm/s\n",
+                   train.train_id, update_msg.tick_count, current_track, current_track_length,
+                   current_front_pos, current_rear_pos, current_speed);
+        }
+
+        MsgReply(rcvid, 0, NULL, 0);
+
+        // Decision making on each tick
+        // If approaching end of track and haven't requested destination, request it
+        if (current_track_length > 0 && current_front_pos > (double)current_track_length * 0.8 && !has_requested_destination && current_track != destination_track) {
+            printf("Train %d requesting destination track %d\n", train.train_id, destination_track);
+
+            msg.type = MSG_REQUEST_TRACK;
+            msg.train_id = train.train_id;
+            msg.track_id = destination_track;
+
+            if (MsgSend(dm_coid, &msg, sizeof(msg), &reply, sizeof(reply)) == -1) {
+                perror("Failed to request destination track");
+            } else if (reply.type == MSG_ACK) {
+                printf("Train %d acquired destination track %d\n", train.train_id, destination_track);
+                has_requested_destination = true;
+            } else {
+                printf("Train %d denied destination track %d\n", train.train_id, destination_track);
+            }
+        }
+
+        // If reached destination, exit
+        if (current_track == destination_track && current_track_length > 0 && current_front_pos > (double)current_track_length * 0.9) {
+            printf("Train %d reached destination track %d\n", train.train_id, destination_track);
+            break;
+        }
     }
+
+    // Cleanup
+    name_detach(attach, 0);
+    ConnectDetach(dm_coid);
 }
 
 // Main function to read config and spawn train processes

@@ -21,7 +21,8 @@ typedef enum {
     MSG_ACK,
     MSG_DENY,
     MSG_GET_TRAIN_DATA,    // DeadlockManager -> TrainController: get train data
-    MSG_TRAIN_DATA_REPLY   // TrainController -> DeadlockManager: train data response
+    MSG_TRAIN_DATA_REPLY,  // TrainController -> DeadlockManager: train data response
+    MSG_POSITION_UPDATE     // DeadlockManager -> Train: position update on tick
 } message_type_t;
 
 // IPC message structure
@@ -59,7 +60,7 @@ typedef struct train_data_s {
     // Train position on track
     double front_position;      // Position of train front from track start (mm)
     double rear_position;       // Position of train rear from track start (mm)
-    time_t entry_time;          // When train entered current track (seconds)
+    uint64_t entry_time_ns;     // When train entered current track (monotonic ns)
     double current_speed;       // Current speed of train (mm/s) - may differ from nominal speed
 } train_data_t;
 
@@ -83,6 +84,19 @@ typedef struct {
     int train_id;
     train_data_t train_data;  // Full train data for responses
 } train_query_message_t;
+
+// Position update message
+typedef struct {
+    message_type_t type;
+    int train_id;
+    int track_id;
+    int track_length;      // Length of current track in mm
+    double front_position;      // Position of train front from track start (mm)
+    double rear_position;       // Position of train rear from track start (mm)
+    double current_speed;       // Current speed of train (mm/s)
+    uint64_t tick_time_ns;      // Monotonic time for this tick
+    unsigned long long tick_count;
+} position_update_message_t;
 
 // Forward declaration for helper used by request-priority calculation.
 static time_t get_track_next_available_time(track_data_t *track);

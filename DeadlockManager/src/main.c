@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <pthread.h>
+#include <time.h>
 #include <sys/neutrino.h>
 #include <sys/dispatch.h>
 #include <sys/iofunc.h>
@@ -16,6 +17,13 @@
 #define DEADLOCK_MANAGER_NAME "DeadlockManager"
 
 #define CONFIG_LINE_MAX 256
+#define TICK_INTERVAL_NS 10000000LL
+#define TICK_PULSE_CODE (_PULSE_CODE_MINAVAIL + 1)
+
+typedef union {
+    struct _pulse pulse;
+    ipc_message_t msg;
+} deadlock_receive_t;
 
 // Global track storage
 track_data_t track_list[MAX_TRACKS];
@@ -24,6 +32,9 @@ int track_count = 0;
 // Local storage for active trains (while they're on tracks)
 train_data_t active_trains[MAX_TRAINS];
 int active_train_count = 0;
+
+// Active train connections for sending position updates
+// Note: Trains now have named channels, so we don't need to store scoids
 
 // Mutex protecting the resource manager
 pthread_mutex_t track_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -75,6 +86,46 @@ train_data_t *get_or_create_train_data(int train_id) {
     } else {
         printf("TrainController denied train data request for train %d\n", train_id);
         return NULL;
+    }
+}
+
+// Send position updates to all connected trains
+void send_position_updates(uint64_t tick_time_ns, unsigned long long tick_count) {
+    for (int i = 0; i < active_train_count; i++) {
+        train_data_t *train = &active_trains[i];
+
+        if (train->track_id < 0 || train->track_id >= MAX_TRACKS) {
+            continue;
+        }
+
+        // Connect to the train's channel
+        char train_name[32];
+        sprintf(train_name, "Train%d", train->train_id);
+        int train_coid = name_open(train_name, 0);
+        if (train_coid == -1) {
+            printf("Failed to connect to train %d for position update: %s\n", train->train_id, strerror(errno));
+            continue;
+        }
+
+        // Create position update message
+        position_update_message_t update_msg;
+        update_msg.type = MSG_POSITION_UPDATE;
+        update_msg.train_id = train->train_id;
+        update_msg.track_id = train->track_id;
+        update_msg.track_length = track_list[train->track_id].length;
+        update_msg.front_position = train->front_position;
+        update_msg.rear_position = train->rear_position;
+        update_msg.current_speed = train->current_speed;
+        update_msg.tick_time_ns = tick_time_ns;
+        update_msg.tick_count = tick_count;
+
+        // Send the update and expect no reply
+        if (MsgSend(train_coid, &update_msg, sizeof(update_msg), NULL, 0) == -1) {
+            printf("Failed to send position update to train %d: %s\n", train->train_id, strerror(errno));
+        }
+
+        // Close the connection
+        ConnectDetach(train_coid);
     }
 }
 
@@ -146,7 +197,7 @@ int main(int argc, char *argv[]) {
 
     int chid; // Channel ID
     int rcvid; // Receive ID
-    ipc_message_t msg; // Incoming message buffer
+    deadlock_receive_t recv; // Incoming message or pulse buffer
 
     // Load track topology from file
     if (!load_track_data(argv[1])) {
@@ -165,55 +216,97 @@ int main(int argc, char *argv[]) {
     }
     chid = attach->chid;
 
+    int tick_coid = ConnectAttach(ND_LOCAL_NODE, 0, chid, _NTO_SIDE_CHANNEL, 0);
+    if (tick_coid == -1) {
+        perror("ConnectAttach failed");
+        name_detach(attach, 0);
+        return 1;
+    }
+
+    struct sigevent tick_event;
+    SIGEV_PULSE_INIT(&tick_event, tick_coid, SIGEV_PULSE_PRIO_INHERIT, TICK_PULSE_CODE, 0);
+
+    timer_t tick_timer;
+    if (timer_create(CLOCK_MONOTONIC, &tick_event, &tick_timer) == -1) {
+        perror("timer_create failed");
+        ConnectDetach(tick_coid);
+        name_detach(attach, 0);
+        return 1;
+    }
+
+    struct itimerspec tick_spec;
+    memset(&tick_spec, 0, sizeof(tick_spec));
+    tick_spec.it_value.tv_nsec = TICK_INTERVAL_NS;
+    tick_spec.it_interval.tv_nsec = TICK_INTERVAL_NS;
+    if (timer_settime(tick_timer, 0, &tick_spec, NULL) == -1) {
+        perror("timer_settime failed");
+        timer_delete(tick_timer);
+        ConnectDetach(tick_coid);
+        name_detach(attach, 0);
+        return 1;
+    }
+
     printf("\nDeadlockManager running...\n");
     printf("PID: %d\n", getpid());
     printf("CHID: %d\n", chid);
     printf("Name: %s\n\n", DEADLOCK_MANAGER_NAME);
 
-    // Main server loop
-    // TODO make this fun on tick formulation
-    // TODO use mutex, cond var, etc
-    time_t last_update = time(NULL);
+    unsigned long long tick_count = 0;
     while (1) {
-        // Periodic physics update (every 100ms)
-        time_t current_time = time(NULL);
-        if (difftime(current_time, last_update) >= 0.1) {  // 100ms
-            // Update all tracks with physics
-            for (int i = 0; i < track_count; i++) {
-                if (track_list[i].track_id >= 0) {
-                    track_list[i] = update_track_data(track_list[i]);
-                }
-            }
-            last_update = current_time;
+        rcvid = MsgReceive(chid, &recv, sizeof(recv), NULL);
+        if (rcvid == -1) {
+            continue;
         }
 
-        // Wait for incoming messages from trains
-        rcvid = MsgReceive(chid, &msg, sizeof(msg), NULL);
-        if (rcvid == -1)
+        if (rcvid == 0) {
+            switch (recv.pulse.code) {
+                case TICK_PULSE_CODE: {
+                    uint64_t current_time_ns = get_current_time_ns();
+
+                    tick_count++;
+
+                    pthread_mutex_lock(&track_mutex);
+                    for (int i = 0; i < track_count; i++) {
+                        if (track_list[i].track_id >= 0) {
+                            track_list[i] = update_track_data(track_list[i], current_time_ns);
+                        }
+                    }
+                    send_position_updates(current_time_ns, tick_count);
+                    pthread_mutex_unlock(&track_mutex);
+                    break;
+                }
+                case _PULSE_CODE_DISCONNECT:
+                    ConnectDetach(recv.pulse.scoid);
+                    break;
+                default:
+                    break;
+            }
+
             continue;
+        }
 
         ipc_message_t reply;
 
         // Default reply is DENY
         reply.type = MSG_DENY;
-        reply.train_id = msg.train_id;
-        reply.track_id = msg.track_id;
+        reply.train_id = recv.msg.train_id;
+        reply.track_id = recv.msg.track_id;
 
         // Lock track for processing
         pthread_mutex_lock(&track_mutex);
 
         // Process message based on type
-        switch (msg.type) {
+        switch (recv.msg.type) {
             case MSG_REQUEST_TRACK:
                 // Get train data from TrainController (or local cache)
-                train_data_t *train = get_or_create_train_data(msg.train_id);
+                train_data_t *train = get_or_create_train_data(recv.msg.train_id);
                 
                 if (train == NULL) {
                     reply.type = MSG_DENY;
-                    printf("Train %d denied track %d (no train data available)\n", msg.train_id, msg.track_id);
-                } else if (request_track(msg.train_id, msg.track_id)) {
+                    printf("Train %d denied track %d (no train data available)\n", recv.msg.train_id, recv.msg.track_id);
+                } else if (request_track(train, recv.msg.track_id)) {
                     // Request accepted - add train to track and initialize physics
-                    track_data_t *track = &track_list[msg.track_id];
+                    track_data_t *track = &track_list[recv.msg.track_id];
 
                     // Add train to track's train list
                     if (track->num_trains < MAX_TRAINS) {
@@ -221,31 +314,31 @@ int main(int argc, char *argv[]) {
                         track->num_trains++;
 
                         // Initialize train physics on this track
-                        train->track_id = msg.track_id;
+                        train->track_id = recv.msg.track_id;
                         init_train_on_track(train, (double)train->speed);
 
                         reply.type = MSG_ACK;
-                        printf("Train %d acquired track %d\n", msg.train_id, msg.track_id);
+                        printf("Train %d acquired track %d\n", recv.msg.train_id, recv.msg.track_id);
                     } else {
                         // Track is full despite request_track returning true
                         reply.type = MSG_DENY;
-                        printf("Train %d denied track %d (track full)\n", msg.train_id, msg.track_id);
+                        printf("Train %d denied track %d (track full)\n", recv.msg.train_id, recv.msg.track_id);
                     }
                 } else {
                     reply.type = MSG_DENY;
-                    printf("Train %d denied track %d\n", msg.train_id, msg.track_id);
+                    printf("Train %d denied track %d\n", recv.msg.train_id, recv.msg.track_id);
                 }
                 break;
             case MSG_RELEASE_TRACK:
-                release_track(msg.train_id, msg.track_id);
+                release_track(recv.msg.train_id, recv.msg.track_id);
                 reply.type = MSG_ACK;
-                printf("Train %d released track %d\n", msg.train_id, msg.track_id);
+                printf("Train %d released track %d\n", recv.msg.train_id, recv.msg.track_id);
                 
                 // Note: We keep the train data in active_trains in case it requests another track
                 // The data will be cleaned up when the system shuts down
                 break;
             default:
-                printf("Unknown message type from Train %d\n", msg.train_id);
+                printf("Unknown message type from Train %d\n", recv.msg.train_id);
                 break;
         }
 
@@ -260,6 +353,8 @@ int main(int argc, char *argv[]) {
     }
 
     // TODO remove this, Cleanup (unreachable in normal execution)
+    timer_delete(tick_timer);
+    ConnectDetach(tick_coid);
     name_detach(attach, 0);
     return 0;
 }
