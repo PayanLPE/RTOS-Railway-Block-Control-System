@@ -63,6 +63,85 @@ static int train_is_on_any_track(int train_id) {
     return 0;
 }
 
+static int find_train_index(int train_id) {
+    for (int i = 0; i < active_train_count; i++) {
+        if (active_trains[i].train_id == train_id) {
+            return i;
+        }
+    }
+
+    return -1;
+}
+
+static int find_train_state_index(int train_id) {
+    for (int i = 0; i < active_train_count; i++) {
+        if (train_request_states[i].train_id == train_id) {
+            return i;
+        }
+    }
+
+    return -1;
+}
+
+static void set_train_waiting_speed(train_data_t *train, int waiting) {
+    if (train == NULL) {
+        return;
+    }
+
+    if (waiting) {
+        train->current_speed = 0.0;
+    } else {
+        train->current_speed = (double)train->speed;
+    }
+}
+
+static void resolve_deadlock_cycle(int cycle_train_id, uint64_t current_time_ns) {
+    int train_idx = find_train_index(cycle_train_id);
+    int state_idx = find_train_state_index(cycle_train_id);
+
+    if (train_idx < 0 || state_idx < 0) {
+        return;
+    }
+
+    int held_track = train_request_states[state_idx].currently_holds_track;
+    int wanted_track = train_request_states[state_idx].currently_wants_track;
+
+    if (held_track < 0) {
+        return;
+    }
+
+    release_track(cycle_train_id, held_track);
+
+    active_trains[train_idx].track_id = -1;
+    active_trains[train_idx].front_position = 0.0;
+    active_trains[train_idx].rear_position = -(double)active_trains[train_idx].length;
+    set_train_waiting_speed(&active_trains[train_idx], 1);
+
+    update_train_request_state(&train_request_states[state_idx], -1, wanted_track, current_time_ns);
+
+    printf("[RESOLVE] victim_train=%d released_track=%d waiting_for=%d\n",
+           cycle_train_id,
+           held_track,
+           wanted_track);
+}
+
+static void remove_active_train_at(int idx) {
+    if (idx < 0 || idx >= active_train_count) {
+        return;
+    }
+
+    for (int i = idx; i < active_train_count - 1; i++) {
+        active_trains[i] = active_trains[i + 1];
+        train_request_states[i] = train_request_states[i + 1];
+    }
+
+    active_train_count--;
+    if (active_train_count >= 0 && active_train_count < MAX_TRAINS) {
+        memset(&active_trains[active_train_count], 0, sizeof(train_data_t));
+        initialize_train_request_state(&train_request_states[active_train_count], -1);
+    }
+}
+
 train_data_t *get_or_create_train_data(int train_id) {
     for (int i = 0; i < active_train_count; i++) {
         if (active_trains[i].train_id == train_id) {
@@ -111,15 +190,31 @@ void send_position_updates(uint64_t tick_time_ns, unsigned long long tick_count)
     for (int i = 0; i < active_train_count; i++) {
         train_data_t *train = &active_trains[i];
 
-        if (train->track_id < 0 || train->track_id >= MAX_TRACKS) {
-            continue;
-        }
-
         // Each train listens on a per-train named channel (Train<id>).
         char train_name[32];
         sprintf(train_name, "Train%d", train->train_id);
         int train_coid = name_open(train_name, 0);
         if (train_coid == -1) {
+            int idle_and_unrequested =
+                (train->track_id == -1) &&
+                (train_request_states[i].currently_holds_track == -1) &&
+                (train_request_states[i].currently_wants_track == -1);
+
+            if (idle_and_unrequested) {
+                printf("[CLEANUP] remove inactive train=%d\n", train->train_id);
+
+                for (int j = i; j < active_train_count - 1; j++) {
+                    missing_update_warned[j] = missing_update_warned[j + 1];
+                }
+                if (active_train_count > 0) {
+                    missing_update_warned[active_train_count - 1] = 0;
+                }
+
+                remove_active_train_at(i);
+                i--;
+                continue;
+            }
+
             if (!missing_update_warned[i]) {
                 printf("[WARN] unable to connect for updates: train=%d reason=%s\n", train->train_id, strerror(errno));
                 missing_update_warned[i] = 1;
@@ -132,7 +227,10 @@ void send_position_updates(uint64_t tick_time_ns, unsigned long long tick_count)
         update_msg.type = MSG_POSITION_UPDATE;
         update_msg.train_id = train->train_id;
         update_msg.track_id = train->track_id;
-        update_msg.track_length = track_list[train->track_id].length;
+        update_msg.track_length = 0;
+        if (train->track_id >= 0 && train->track_id < MAX_TRACKS) {
+            update_msg.track_length = track_list[train->track_id].length;
+        }
         update_msg.front_position = train->front_position;
         update_msg.rear_position = train->rear_position;
         update_msg.current_speed = train->current_speed;
@@ -252,20 +350,9 @@ void check_deadlock_and_recover(uint64_t current_time_ns) {
             last_deadlock_log_ns = current_time_ns;
             last_deadlock_train = deadlock_train;
         }
-        
-        // Try to recover by suggesting reroute
-        for (int i = 0; i < active_train_count; i++) {
-            if (active_trains[i].train_id == deadlock_train) {
-                int suggested_track = -1;
-                if (suggest_reroute(deadlock_train, active_trains, active_train_count,
-                                   track_list, track_count, active_trains[i].track_id, 
-                                   &suggested_track) == 0) {
-                          printf("[RECOVERY] suggest train=%d reroute_track=%d\n",
-                              deadlock_train, suggested_track);
-                }
-                break;
-            }
-        }
+
+        // Resolve by rolling back one train in the cycle.
+        resolve_deadlock_cycle(deadlock_train, current_time_ns);
     }
 }
 
@@ -425,6 +512,7 @@ int main(int argc, char *argv[]) {
                     track->num_trains = 1;
 
                     train->track_id = recv.msg.track_id;
+                    set_train_waiting_speed(train, 0);
 
                     // Update state: now holds this track
                     for (int i = 0; i < active_train_count; i++) {
@@ -441,6 +529,7 @@ int main(int argc, char *argv[]) {
                     printf("[GRANT] train=%d track=%d\n", recv.msg.train_id, recv.msg.track_id);
                 } else {
                     reply.type = MSG_DENY;
+                    set_train_waiting_speed(train, 1);
                     printf("[DENY] train=%d track=%d\n", recv.msg.train_id, recv.msg.track_id);
 
                     // If this train holds no track, it likely failed initial admission.
@@ -453,6 +542,12 @@ int main(int argc, char *argv[]) {
             }
             case MSG_RELEASE_TRACK: {
                 release_track(recv.msg.train_id, recv.msg.track_id);
+
+                int train_idx = find_train_index(recv.msg.train_id);
+                if (train_idx >= 0) {
+                    active_trains[train_idx].track_id = -1;
+                    set_train_waiting_speed(&active_trains[train_idx], 1);
+                }
                 
                 // Update train request state: no longer holds this track
                 for (int i = 0; i < active_train_count; i++) {

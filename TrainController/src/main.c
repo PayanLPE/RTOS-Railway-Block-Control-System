@@ -18,6 +18,7 @@
 #define TICK_LOG_INTERVAL 25ULL
 #define REQUEST_AFTER_TICKS 40ULL
 #define COMPLETE_AFTER_TICKS 20ULL
+#define REQUEST_RETRY_TICKS 10ULL
 #define DEFAULT_TRAIN_LENGTH_MM 1
 
 // TrainController is the source of truth for train metadata.
@@ -106,6 +107,8 @@ void run_train_process(train_data_t train) {
     int destination_track = train.destination;
     unsigned long long ticks_on_current_track = 0;
     bool has_requested_destination = false;
+    unsigned long long last_request_tick = 0;
+    unsigned long long current_tick = 0;
 
     ipc_message_t msg;
     msg.type = MSG_REQUEST_TRACK;
@@ -150,31 +153,60 @@ void run_train_process(train_data_t train) {
 
         position_update_message_t update_msg = recv.update;
         if (update_msg.type == MSG_POSITION_UPDATE && update_msg.train_id == train.train_id) {
+            current_tick = update_msg.tick_count;
+
             if (current_track != update_msg.track_id) {
                 current_track = update_msg.track_id;
                 ticks_on_current_track = 0;
                 has_requested_destination = (current_track == destination_track);
             } else {
-                ticks_on_current_track++;
+                if (update_msg.current_speed > 0.0) {
+                    ticks_on_current_track++;
+                }
             }
 
-                 if (last_logged_tick == 0 ||
-                  update_msg.tick_count - last_logged_tick >= TICK_LOG_INTERVAL ||
-                  current_track != last_logged_track) {
-                  printf("[TICK] train=%d tick=%llu track=%d state_ticks=%llu\n",
-                      train.train_id,
-                      update_msg.tick_count,
-                      current_track,
-                      ticks_on_current_track);
-                  last_logged_tick = update_msg.tick_count;
-                  last_logged_track = current_track;
-                 }
+            if (last_logged_tick == 0 ||
+                update_msg.tick_count - last_logged_tick >= TICK_LOG_INTERVAL ||
+                current_track != last_logged_track) {
+                printf("[TICK] train=%d tick=%llu track=%d speed=%.1f state_ticks=%llu\n",
+                       train.train_id,
+                       update_msg.tick_count,
+                       current_track,
+                       update_msg.current_speed,
+                       ticks_on_current_track);
+                last_logged_tick = update_msg.tick_count;
+                last_logged_track = current_track;
+            }
+
         }
 
         MsgReply(rcvid, 0, NULL, 0);
 
+        // If this train was rolled back, keep retrying destination until admitted again.
+        // Important: this must happen after MsgReply to avoid blocking manager tick sends.
+        if (current_track == -1 &&
+            (last_request_tick == 0 || current_tick - last_request_tick >= REQUEST_RETRY_TICKS)) {
+            printf("[TRAIN %d] retry acquire track=%d\n", train.train_id, destination_track);
+
+            msg.type = MSG_REQUEST_TRACK;
+            msg.train_id = train.train_id;
+            msg.track_id = destination_track;
+
+            if (MsgSend(dm_coid, &msg, sizeof(msg), &reply, sizeof(reply)) == -1) {
+                perror("Failed to retry destination track");
+            } else if (reply.type == MSG_ACK) {
+                printf("[TRAIN %d] reacquired track=%d\n", train.train_id, destination_track);
+            } else {
+                printf("[TRAIN %d] retry denied track=%d\n", train.train_id, destination_track);
+            }
+
+            last_request_tick = current_tick;
+        }
+
         // Block model: request next block after spending enough ticks in current block.
-        if (!has_requested_destination && current_track != destination_track && ticks_on_current_track >= REQUEST_AFTER_TICKS) {
+        if (!has_requested_destination && current_track != destination_track &&
+            ticks_on_current_track >= REQUEST_AFTER_TICKS &&
+            (last_request_tick == 0 || current_tick - last_request_tick >= REQUEST_RETRY_TICKS)) {
             printf("[TRAIN %d] request destination track=%d\n", train.train_id, destination_track);
 
             msg.type = MSG_REQUEST_TRACK;
@@ -189,11 +221,21 @@ void run_train_process(train_data_t train) {
             } else {
                 printf("[TRAIN %d] denied destination track=%d\n", train.train_id, destination_track);
             }
+
+            last_request_tick = current_tick;
         }
 
         // Complete route after enough ticks in destination block.
         if (current_track == destination_track && ticks_on_current_track >= COMPLETE_AFTER_TICKS) {
             printf("[TRAIN %d] reached destination track=%d\n", train.train_id, destination_track);
+
+            msg.type = MSG_RELEASE_TRACK;
+            msg.train_id = train.train_id;
+            msg.track_id = current_track;
+            if (MsgSend(dm_coid, &msg, sizeof(msg), &reply, sizeof(reply)) == -1) {
+                perror("Failed to release destination track");
+            }
+
             break;
         }
     }
