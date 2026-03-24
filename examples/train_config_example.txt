@@ -2,9 +2,9 @@
 # parser format: train_id start_track_id destination_track_id speed_mm_per_s
 #
 # Visual intent:
-# - Train 1: 0 -> 4 through shared track 2
-# - Train 2: 1 -> 4 through shared track 2
-# - only one can hold track 2 at a time, then second follows
+# - Train 1: 0 -> 5
+# - Train 2: 4 -> 1
+# - both contend around shared topology anchored at track 2
 #
-1 0 4 700
-2 1 4 650
+1 0 5 700
+2 4 1 650
