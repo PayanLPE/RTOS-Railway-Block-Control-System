@@ -83,6 +83,68 @@ static int find_train_state_index(int train_id) {
     return -1;
 }
 
+static int find_opposing_head_on_peer(int train_id) {
+    int idx = find_train_index(train_id);
+    int sidx = find_train_state_index(train_id);
+    if (idx < 0 || sidx < 0) {
+        return -1;
+    }
+
+    int holds = train_request_states[sidx].currently_holds_track;
+    int wants = train_request_states[sidx].currently_wants_track;
+    if (holds < 0 || wants < 0 || holds == wants) {
+        return -1;
+    }
+
+    for (int i = 0; i < active_train_count; i++) {
+        if (active_trains[i].train_id == train_id) {
+            continue;
+        }
+        if (train_request_states[i].currently_holds_track == wants &&
+            train_request_states[i].currently_wants_track == holds) {
+            return active_trains[i].train_id;
+        }
+    }
+
+    return -1;
+}
+
+static int tracks_are_direct_neighbors(int from_track, int to_track) {
+    if (from_track < 0 || to_track < 0 || from_track >= MAX_TRACKS || to_track >= MAX_TRACKS) {
+        return 0;
+    }
+    if (track_list[from_track].track_id < 0 || track_list[to_track].track_id < 0) {
+        return 0;
+    }
+    for (int i = 0; i < MAX_TRACK_ENDPOINTS; i++) {
+        if (track_list[from_track].endpoints[i] == to_track ||
+            track_list[to_track].endpoints[i] == from_track) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int detect_head_on_peer_for_request(int train_id, int from_track, int to_track) {
+    if (from_track < 0 || to_track < 0 || from_track == to_track) {
+        return -1;
+    }
+    if (!tracks_are_direct_neighbors(from_track, to_track)) {
+        return -1;
+    }
+
+    for (int i = 0; i < active_train_count; i++) {
+        if (active_trains[i].train_id == train_id) {
+            continue;
+        }
+        if (train_request_states[i].currently_holds_track == to_track &&
+            train_request_states[i].currently_wants_track == from_track) {
+            return active_trains[i].train_id;
+        }
+    }
+    return -1;
+}
+
 static void set_train_waiting_speed(train_data_t *train, int waiting) {
     if (train == NULL) {
         return;
@@ -351,8 +413,15 @@ void check_deadlock_and_recover(uint64_t current_time_ns) {
             last_deadlock_train = deadlock_train;
         }
 
-        // Resolve by rolling back one train in the cycle.
-        resolve_deadlock_cycle(deadlock_train, current_time_ns);
+        int peer = find_opposing_head_on_peer(deadlock_train);
+        if (peer >= 0) {
+            printf("[UNRESOLVABLE] head-on single-track conflict train=%d peer=%d. Manual intervention required.\n",
+                   deadlock_train,
+                   peer);
+        } else {
+            // Resolve by rolling back one train in the cycle.
+            resolve_deadlock_cycle(deadlock_train, current_time_ns);
+        }
     }
 }
 
@@ -483,59 +552,86 @@ int main(int argc, char *argv[]) {
                         }
                     }
                 }
-                
-                // Update train request state (now wants this track)
-                for (int i = 0; i < active_train_count; i++) {
-                    if (active_trains[i].train_id == recv.msg.train_id) {
-                        update_train_request_state(&train_request_states[i], 
-                                                   active_trains[i].track_id, 
-                                                   recv.msg.track_id, 
-                                                   current_time_ns);
-                        break;
-                    }
+
+                int head_on_peer = -1;
+                if (train != NULL) {
+                    head_on_peer = detect_head_on_peer_for_request(
+                        recv.msg.train_id, train->track_id, recv.msg.track_id);
                 }
-                
-                if (train == NULL) {
-                    reply.type = MSG_DENY;
-                    printf("[DENY] train=%d track=%d reason=no-train-data\n", recv.msg.train_id, recv.msg.track_id);
-                } else if (request_track(train, recv.msg.track_id)) {
-                    track_data_t *track = &track_list[recv.msg.track_id];
-                    int old_track_id = train->track_id;
-                    if (old_track_id != -1 && old_track_id != recv.msg.track_id) {
-                        release_track(recv.msg.train_id, old_track_id);
-                        printf("[RELEASE] train=%d track=%d\n", recv.msg.train_id, old_track_id);
-                    }
 
-                    // Block model: exactly one train per track.
-                    memset(track->trains, 0, sizeof(track->trains));
-                    track->trains[0] = train;
-                    track->num_trains = 1;
-
-                    train->track_id = recv.msg.track_id;
-                    set_train_waiting_speed(train, 0);
-
-                    // Update state: now holds this track
+                if (train != NULL && head_on_peer >= 0) {
                     for (int i = 0; i < active_train_count; i++) {
                         if (active_trains[i].train_id == recv.msg.train_id) {
                             update_train_request_state(&train_request_states[i],
+                                                       active_trains[i].track_id,
                                                        recv.msg.track_id,
-                                                       -1,
+                                                       current_time_ns);
+                            break;
+                        }
+                    }
+                    reply.type = MSG_DENY;
+                    set_train_waiting_speed(train, 1);
+                    printf("[UNRESOLVABLE] train=%d wants=%d and peer=%d wants reverse direction\n",
+                           recv.msg.train_id,
+                           recv.msg.track_id,
+                           head_on_peer);
+                    printf("[DENY] train=%d track=%d reason=head-on-unresolvable\n",
+                           recv.msg.train_id,
+                           recv.msg.track_id);
+                } else {
+                    // Update train request state (now wants this track)
+                    for (int i = 0; i < active_train_count; i++) {
+                        if (active_trains[i].train_id == recv.msg.train_id) {
+                            update_train_request_state(&train_request_states[i],
+                                                       active_trains[i].track_id,
+                                                       recv.msg.track_id,
                                                        current_time_ns);
                             break;
                         }
                     }
 
-                    reply.type = MSG_ACK;
-                    printf("[GRANT] train=%d track=%d\n", recv.msg.train_id, recv.msg.track_id);
-                } else {
-                    reply.type = MSG_DENY;
-                    set_train_waiting_speed(train, 1);
-                    printf("[DENY] train=%d track=%d\n", recv.msg.train_id, recv.msg.track_id);
+                    if (train == NULL) {
+                        reply.type = MSG_DENY;
+                        printf("[DENY] train=%d track=%d reason=no-train-data\n", recv.msg.train_id, recv.msg.track_id);
+                    } else if (request_track(train, recv.msg.track_id)) {
+                        track_data_t *track = &track_list[recv.msg.track_id];
+                        int old_track_id = train->track_id;
+                        if (old_track_id != -1 && old_track_id != recv.msg.track_id) {
+                            release_track(recv.msg.train_id, old_track_id);
+                            printf("[RELEASE] train=%d track=%d\n", recv.msg.train_id, old_track_id);
+                        }
 
-                    // If this train holds no track, it likely failed initial admission.
-                    // Mark it inactive so tick path stops trying position updates for it.
-                    if (train != NULL && !train_is_on_any_track(train->train_id)) {
-                        train->track_id = -1;
+                        // Block model: exactly one train per track.
+                        memset(track->trains, 0, sizeof(track->trains));
+                        track->trains[0] = train;
+                        track->num_trains = 1;
+
+                        train->track_id = recv.msg.track_id;
+                        set_train_waiting_speed(train, 0);
+
+                        // Update state: now holds this track
+                        for (int i = 0; i < active_train_count; i++) {
+                            if (active_trains[i].train_id == recv.msg.train_id) {
+                                update_train_request_state(&train_request_states[i],
+                                                           recv.msg.track_id,
+                                                           -1,
+                                                           current_time_ns);
+                                break;
+                            }
+                        }
+
+                        reply.type = MSG_ACK;
+                        printf("[GRANT] train=%d track=%d\n", recv.msg.train_id, recv.msg.track_id);
+                    } else {
+                        reply.type = MSG_DENY;
+                        set_train_waiting_speed(train, 1);
+                        printf("[DENY] train=%d track=%d\n", recv.msg.train_id, recv.msg.track_id);
+
+                        // If this train holds no track, it likely failed initial admission.
+                        // Mark it inactive so tick path stops trying position updates for it.
+                        if (train != NULL && !train_is_on_any_track(train->train_id)) {
+                            train->track_id = -1;
+                        }
                     }
                 }
                 break;

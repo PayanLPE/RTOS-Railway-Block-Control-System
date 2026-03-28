@@ -1,0 +1,17 @@
+# CONFIG DEMO trains: resolvable cycle + shared contention
+# parser format: train_id start_track_id destination_track_id speed_mm_per_s
+#
+# Visual intent:
+# - Train 1: 1 -> 2
+# - Train 2: 2 -> 4
+# - Train 3: 4 -> 1   (forms cycle 1->2->4->1, resolvable by rollback recovery)
+# - Train 4: 3 -> 2   (adds pressure on shared track 2)
+#
+# Expected:
+# - temporary deadlock/cycle may appear
+# - manager deadlock recovery should resolve and allow completion
+#
+1 1 2 900
+2 2 4 900
+3 4 1 900
+4 3 2 700

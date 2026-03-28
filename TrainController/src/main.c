@@ -19,6 +19,8 @@
 #define REQUEST_AFTER_TICKS 40ULL
 #define COMPLETE_AFTER_TICKS 20ULL
 #define REQUEST_RETRY_TICKS 10ULL
+#define MAX_NO_PROGRESS_TICKS 1200ULL
+#define MAX_CONSECUTIVE_DENIES 8
 #define DEFAULT_TRAIN_LENGTH_MM 1
 
 // TrainController is the source of truth for train metadata.
@@ -131,6 +133,8 @@ void run_train_process(train_data_t train) {
 
     unsigned long long last_logged_tick = 0;
     int last_logged_track = current_track;
+    unsigned long long last_progress_tick = 0;
+    int consecutive_destination_denies = 0;
 
     // Each train process listens for position updates and decides when to request next track.
     while (1) {
@@ -159,9 +163,11 @@ void run_train_process(train_data_t train) {
                 current_track = update_msg.track_id;
                 ticks_on_current_track = 0;
                 has_requested_destination = (current_track == destination_track);
+                last_progress_tick = current_tick;
             } else {
                 if (update_msg.current_speed > 0.0) {
                     ticks_on_current_track++;
+                    last_progress_tick = current_tick;
                 }
             }
 
@@ -196,8 +202,10 @@ void run_train_process(train_data_t train) {
                 perror("Failed to retry destination track");
             } else if (reply.type == MSG_ACK) {
                 printf("[TRAIN %d] reacquired track=%d\n", train.train_id, destination_track);
+                consecutive_destination_denies = 0;
             } else {
                 printf("[TRAIN %d] retry denied track=%d\n", train.train_id, destination_track);
+                consecutive_destination_denies++;
             }
 
             last_request_tick = current_tick;
@@ -218,8 +226,10 @@ void run_train_process(train_data_t train) {
             } else if (reply.type == MSG_ACK) {
                 printf("[TRAIN %d] acquired destination track=%d\n", train.train_id, destination_track);
                 has_requested_destination = true;
+                consecutive_destination_denies = 0;
             } else {
                 printf("[TRAIN %d] denied destination track=%d\n", train.train_id, destination_track);
+                consecutive_destination_denies++;
             }
 
             last_request_tick = current_tick;
@@ -236,6 +246,39 @@ void run_train_process(train_data_t train) {
                 perror("Failed to release destination track");
             }
 
+            break;
+        }
+
+        if (consecutive_destination_denies >= MAX_CONSECUTIVE_DENIES) {
+            printf("[UNRESOLVABLE] train=%d destination=%d denied %d consecutive times\n",
+                   train.train_id, destination_track, consecutive_destination_denies);
+            if (current_track >= 0) {
+                msg.type = MSG_RELEASE_TRACK;
+                msg.train_id = train.train_id;
+                msg.track_id = current_track;
+                (void)MsgSend(dm_coid, &msg, sizeof(msg), &reply, sizeof(reply));
+            }
+            break;
+        }
+
+        // Terminate stuck trains so scenarios do not run forever.
+        if (last_progress_tick > 0 &&
+            current_tick > last_progress_tick &&
+            (current_tick - last_progress_tick) >= MAX_NO_PROGRESS_TICKS) {
+            printf("[UNRESOLVABLE] train=%d case cannot be resolved by current deadlock policy\n",
+                   train.train_id);
+            printf("[TRAIN %d] abort: no progress for %llu ticks (track=%d dest=%d)\n",
+                   train.train_id,
+                   (current_tick - last_progress_tick),
+                   current_track,
+                   destination_track);
+
+            if (current_track >= 0) {
+                msg.type = MSG_RELEASE_TRACK;
+                msg.train_id = train.train_id;
+                msg.track_id = current_track;
+                (void)MsgSend(dm_coid, &msg, sizeof(msg), &reply, sizeof(reply));
+            }
             break;
         }
     }

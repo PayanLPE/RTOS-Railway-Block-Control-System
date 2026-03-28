@@ -1,7 +1,10 @@
-# train_id start_track_id destination_track_id speed_mm_per_s
-# SUCCESS CASE (no deadlock cycle)
-# Train 1 and Train 2 request different destination blocks.
-1 0 4 700
-2 1 5 650
-# Train 3 stays in the same block and completes without requesting another block.
-3 3 3 600
+# CONFIG EXAMPLE trains: simple shared-track success
+# parser format: train_id start_track_id destination_track_id speed_mm_per_s
+#
+# Visual intent:
+# - Train 1: 0 -> 5
+# - Train 2: 4 -> 1
+# - both contend around shared topology anchored at track 2
+#
+1 0 5 700
+2 4 1 650
